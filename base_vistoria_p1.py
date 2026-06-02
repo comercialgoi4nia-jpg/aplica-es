@@ -5,25 +5,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-COLUNAS_NECESSARIAS = {"Subtipo", "Data Inclusão", "Numero", "Valor Faturas"}
-SUBTIPOS_P1 = [
-    "P1 SUSPENSÃO - GRUPO A",
-    "P1 SUSPENSÃO - POSTE",
-    "P1 VISTORIA - RETIRADA DE RAMAL",
-]
-
-
-def detectar_aba(xls: pd.ExcelFile) -> str | None:
-    """Retorna o nome da primeira aba que contenha as colunas necessárias."""
-    for sheet in xls.sheet_names:
-        try:
-            df = xls.parse(sheet, nrows=5)
-            if COLUNAS_NECESSARIAS.issubset(df.columns):
-                return sheet
-        except Exception:
-            continue
-    return None
-
 
 def gerar_excel(tabela: pd.DataFrame) -> bytes:
     wb = Workbook()
@@ -58,6 +39,7 @@ def gerar_excel(tabela: pd.DataFrame) -> bytes:
         c.border = borda
     ws.row_dimensions[2].height = 30
 
+    # Dados
     meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
              "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
 
@@ -114,77 +96,93 @@ def gerar_excel(tabela: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.read()
 
-
-# ── UI ──────────────────────────────────────────────────────────────────────
-
 st.set_page_config(page_title="Acompanhamento Suspensão/Vistoria P1", layout="wide")
+
 st.title("📋 Acompanhamento de Suspensão/Vistoria P1")
 
-uploaded_file = st.file_uploader(
-    "Suba a base (.xlsx)",
-    type=["xlsx"],
-    help="Apenas arquivos no formato .xlsx são aceitos.",
-)
+uploaded_file = st.file_uploader("Suba a base (.xlsx)", type=["xlsx"])
 
-if uploaded_file is not None:
-    # Validar extensão explicitamente
-    if not uploaded_file.name.lower().endswith(".xlsx"):
-        st.error("⚠️ Formato inválido! Por favor, suba apenas arquivos **.xlsx**.")
-        st.stop()
+SUBTIPOS_P1 = [
+    "P1 SUSPENSÃO - GRUPO A",
+    "P1 SUSPENSÃO - POSTE",
+    "P1 VISTORIA - RETIRADA DE RAMAL",
+]
 
+if uploaded_file:
     try:
-        xls = pd.ExcelFile(uploaded_file)
-        aba = detectar_aba(xls)
+        df = pd.read_excel(uploaded_file, sheet_name="Sheet1")
 
-        if aba is None:
-            abas = ", ".join(xls.sheet_names)
-            st.error(
-                f"❌ Nenhuma aba válida encontrada no arquivo.\n\n"
-                f"Abas encontradas: **{abas}**\n\n"
-                f"O arquivo precisa ter as colunas: {', '.join(sorted(COLUNAS_NECESSARIAS))}"
-            )
+        # Validar colunas necessárias
+        required_cols = {"Subtipo", "Data Inclusão", "Numero", "Valor Faturas"}
+        if not required_cols.issubset(df.columns):
+            st.error(f"Colunas esperadas não encontradas. Necessário: {required_cols}")
             st.stop()
 
-        st.success(f"✅ Base carregada com sucesso! Aba utilizada: **{aba}**")
-
-        df = xls.parse(aba)
-
-        # Filtrar subtipos P1
+        # Filtrar apenas subtipos P1
         df_p1 = df[df["Subtipo"].isin(SUBTIPOS_P1)].copy()
+
+        # Tratar data
         df_p1["Data Inclusão"] = pd.to_datetime(df_p1["Data Inclusão"]).dt.date
 
-        # Pivot: contagem por dia e subtipo
+        # Pivot: contagem de serviços por dia e subtipo
         pivot_qtd = (
             df_p1.groupby(["Data Inclusão", "Subtipo"])["Numero"]
             .count()
             .unstack(fill_value=0)
             .reindex(columns=SUBTIPOS_P1, fill_value=0)
         )
+
+        # Total geral por dia
         pivot_qtd["Total Geral"] = pivot_qtd.sum(axis=1)
 
-        # Dívida por dia
+        # Soma da dívida por dia
         divida_dia = (
             df_p1.groupby("Data Inclusão")["Valor Faturas"]
             .sum()
             .rename("Total Dívida")
         )
 
-        tabela = pivot_qtd.join(divida_dia).reset_index().rename(columns={"Data Inclusão": "DATA"}).sort_values("DATA")
+        # Montar tabela final
+        tabela = pivot_qtd.join(divida_dia).reset_index()
+        tabela = tabela.rename(columns={"Data Inclusão": "DATA"})
+        tabela = tabela.sort_values("DATA")
 
-        # ── Métricas ──
+        # Linha de totais
+        totais = tabela.drop(columns="DATA").sum()
+        totais_row = pd.DataFrame([["Total Geral"] + totais.tolist()], columns=tabela.columns)
+        tabela_exibir = pd.concat([tabela, totais_row], ignore_index=True)
+
+        # Formatar datas
+        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
+            lambda x: x.strftime("%d/%b").replace("/0", "/").replace(
+                "Jan","jan").replace("Feb","fev").replace("Mar","mar").replace(
+                "Apr","abr").replace("May","mai").replace("Jun","jun").replace(
+                "Jul","jul").replace("Aug","ago").replace("Sep","set").replace(
+                "Oct","out").replace("Nov","nov").replace("Dec","dez")
+            if hasattr(x, "strftime") else str(x)
+        )
+
+        # Formatar dívida como moeda BR
+        tabela_exibir["Total Dívida"] = tabela_exibir["Total Dívida"].apply(
+            lambda x: f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            if x != "Total Dívida" else x
+        )
+
+        # Métricas resumo
         st.subheader("Resumo do Período")
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("P1 Suspensão - Grupo A",   int(pivot_qtd["P1 SUSPENSÃO - GRUPO A"].sum()))
-        col2.metric("P1 Suspensão - Poste",      int(pivot_qtd["P1 SUSPENSÃO - POSTE"].sum()))
-        col3.metric("P1 Vistoria - Ret. Ramal",  int(pivot_qtd["P1 VISTORIA - RETIRADA DE RAMAL"].sum()))
-        total_fmt = f"R$ {divida_dia.sum():,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        col1.metric("P1 Suspensão - Grupo A", int(pivot_qtd["P1 SUSPENSÃO - GRUPO A"].sum()))
+        col2.metric("P1 Suspensão - Poste", int(pivot_qtd["P1 SUSPENSÃO - POSTE"].sum()))
+        col3.metric("P1 Vistoria - Ret. Ramal", int(pivot_qtd["P1 VISTORIA - RETIRADA DE RAMAL"].sum()))
+        total_divida = divida_dia.sum()
+        total_fmt = f"R$ {total_divida:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         col4.metric("Total Dívida", total_fmt)
 
         st.divider()
 
-        # ── Tabela + botão download ──
         col_titulo, col_btn = st.columns([4, 1])
         col_titulo.subheader("Detalhamento por Dia")
+
         excel_bytes = gerar_excel(tabela)
         col_btn.download_button(
             label="⬇️ Baixar Excel",
@@ -193,34 +191,6 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
-        # Tabela formatada para exibição
-        tabela_exibir = tabela.copy()
-        meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
-                 "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
-        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
-            lambda x: "".join(
-                meses.get(x.strftime("%b"), x.strftime("%b")) if i == 1 else p
-                for i, p in enumerate(x.strftime("%d/%b").split("/"))
-            ) if hasattr(x, "strftime") else str(x)
-        )
-        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
-            lambda x: x[:3] + "/" + "".join(meses.get(x[3:], x[3:])) if hasattr(x, "split") else x
-        )
-        tabela_exibir["DATA"] = tabela["DATA"].apply(
-            lambda x: x.strftime("%d/") + meses.get(x.strftime("%b"), x.strftime("%b"))
-            if hasattr(x, "strftime") else str(x)
-        )
-        tabela_exibir["Total Dívida"] = tabela["Total Dívida"].apply(
-            lambda x: f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        )
-
-        # Linha Total Geral
-        totais = tabela.drop(columns="DATA").sum()
-        totais_fmt = totais.copy()
-        totais_fmt["Total Dívida"] = f"R$ {totais['Total Dívida']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        totais_row = pd.DataFrame([["Total Geral"] + totais_fmt.tolist()], columns=tabela_exibir.columns)
-        tabela_exibir = pd.concat([tabela_exibir, totais_row], ignore_index=True)
 
         st.dataframe(
             tabela_exibir,
@@ -238,6 +208,5 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"Erro ao processar o arquivo: {e}")
-
 else:
     st.info("👆 Suba um arquivo .xlsx para começar.")
