@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Comparador de Bases", page_icon="🔍", layout="wide")
 
@@ -30,7 +30,11 @@ ALIASES_COLUNAS = {
     "Serviço":           ["Serviço", "Servico", "serviço"],
 }
 
-TIPO_EXCLUIDO_OPER ="RESTABELECIMENTO FORNEC. NORMAL" 
+# Lista de tipos excluídos do Oper
+TIPOS_EXCLUIDOS_OPER = [
+    "RESTABELECIMENTO FORNEC. NORMAL",
+    "RESTABELECIMENTO FORNEC. NORMAL - MUDANÇA TITULARIDADE",
+]
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -84,7 +88,6 @@ def resolver_colunas(df: pd.DataFrame, mapa: dict) -> dict:
 
 
 def validar_colunas_obrigatorias(df: pd.DataFrame, cols: dict, nome_arquivo: str) -> bool:
-    # situacao é opcional — não entra na validação obrigatória
     obrigatorias = {k: v for k, v in cols.items() if k != "situacao"}
     ausentes = [v for v in obrigatorias.values() if v not in df.columns]
     if ausentes:
@@ -173,14 +176,36 @@ def grafico_barras(n_cbill: int, n_oper: int, s_cbill: int, s_oper: int) -> go.F
 aba_config, aba_dash = st.sidebar.tabs(["⚙️ Configurações", "📊 Dashboard"])
 
 with aba_config:
-    data_filtro = st.date_input("Data limite a comparar", value=datetime.today())
+    # ── Modo de filtro de data ──
+    modo_data = st.radio(
+        "Modo de filtro de data",
+        ["📅 Dia único", "📆 Intervalo de datas"],
+        horizontal=True,
+    )
+
+    if modo_data == "📅 Dia único":
+        data_inicio = st.date_input("Data a comparar", value=datetime.today())
+        data_fim = data_inicio
+        label_periodo = data_inicio.strftime("%d/%m/%Y")
+    else:
+        col_di, col_df = st.columns(2)
+        with col_di:
+            data_inicio = st.date_input("Data início", value=datetime.today())
+        with col_df:
+            data_fim = st.date_input("Data fim", value=datetime.today() + timedelta(days=6))
+        if data_fim < data_inicio:
+            st.error("⚠️ A data fim deve ser igual ou posterior à data início.")
+            st.stop()
+        label_periodo = f"{data_inicio.strftime('%d/%m/%Y')} → {data_fim.strftime('%d/%m/%Y')}"
+
     st.markdown("---")
     st.markdown("**Colunas utilizadas:**")
     st.markdown("🔵 **Cbill:** `Serviço` · `Prazo de execução` · `Tipo Serviço`")
     st.markdown("🟠 **Oper:** `Numero` · `Data/Hora Limite` · `Subtipo` · `Situação`")
     st.markdown("---")
-    st.markdown("**Filtro automático Oper:**")
-    st.markdown(f"🚫 Excluídos: `{TIPO_EXCLUIDO_OPER}`")
+    st.markdown("**Filtros automáticos Oper:**")
+    for t in TIPOS_EXCLUIDOS_OPER:
+        st.markdown(f"🚫 `{t}`")
     st.markdown("---")
     st.info(
         "💡 **Padrão de nomes esperado:**\n"
@@ -245,14 +270,12 @@ if arquivo_cbill and arquivo_oper_com:
             df_oper_gd = deduplicar(df_oper_gd, cols_oper_gd["servico"], "Oper GD")
             df_oper_gd = normalizar_datas(df_oper_gd, cols_oper_gd["data"])
 
-            # Padroniza colunas da GD para bater com Comercial
             rename_gd = {
                 cols_oper_gd["servico"]:  cols_oper_com["servico"],
                 cols_oper_gd["data"]:     cols_oper_com["data"],
                 cols_oper_gd["tipo"]:     cols_oper_com["tipo"],
             }
-            # Situação: inclui no rename se existir na GD
-            col_sit_gd = cols_oper_gd.get("situacao")
+            col_sit_gd  = cols_oper_gd.get("situacao")
             col_sit_com = cols_oper_com.get("situacao")
             if col_sit_gd and col_sit_gd in df_oper_gd.columns and col_sit_com:
                 rename_gd[col_sit_gd] = col_sit_com
@@ -262,15 +285,25 @@ if arquivo_cbill and arquivo_oper_com:
         else:
             df_oper_full = df_oper_com.copy()
 
-        # ── filtra pela data ──
-        data_alvo  = pd.Timestamp(data_filtro).date()
-        base_cbill = df_cbill[df_cbill[cols_cbill["data"]].dt.date == data_alvo].copy()
-        base_oper  = df_oper_full[df_oper_full[cols_oper_com["data"]].dt.date == data_alvo].copy()
+        # ── filtra pelo intervalo de datas ──
+        ts_inicio = pd.Timestamp(data_inicio)
+        ts_fim    = pd.Timestamp(data_fim) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
-        # ── remove RESTABELECIMENTO apenas do Oper ──
+        base_cbill = df_cbill[
+            (df_cbill[cols_cbill["data"]] >= ts_inicio) &
+            (df_cbill[cols_cbill["data"]] <= ts_fim)
+        ].copy()
+
+        base_oper = df_oper_full[
+            (df_oper_full[cols_oper_com["data"]] >= ts_inicio) &
+            (df_oper_full[cols_oper_com["data"]] <= ts_fim)
+        ].copy()
+
+        # ── remove tipos excluídos apenas do Oper ──
         col_tipo_oper = cols_oper_com["tipo"]
+        tipos_upper   = [t.upper() for t in TIPOS_EXCLUIDOS_OPER]
         base_oper = base_oper[
-            base_oper[col_tipo_oper].astype(str).str.strip().str.upper() != TIPO_EXCLUIDO_OPER.upper()
+            ~base_oper[col_tipo_oper].astype(str).str.strip().str.upper().isin(tipos_upper)
         ].copy()
 
         total_cbill = len(base_cbill)
@@ -278,6 +311,7 @@ if arquivo_cbill and arquivo_oper_com:
 
         # ── métricas ──
         st.markdown("---")
+        st.markdown(f"### 📅 Período analisado: **{label_periodo}**")
         m1, m2, m3 = st.columns(3)
         m1.metric("Serviços Cbill", total_cbill)
         m2.metric("Serviços Oper (sem Restab.)", total_oper)
@@ -304,8 +338,8 @@ if arquivo_cbill and arquivo_oper_com:
                 registros.append({
                     "servico":        row[col_srv_cbill],
                     "tipo_servico":   str(row.get(col_tipo_cbill, "")).strip(),
-                    "situacao":       "—",   # Cbill não tem Situação
-                    "data_limite":    row[cols_cbill["data"]].date() if pd.notna(row[cols_cbill["data"]]) else data_filtro,
+                    "situacao":       "—",
+                    "data_limite":    row[cols_cbill["data"]].date() if pd.notna(row[cols_cbill["data"]]) else data_inicio,
                     "ausente_em":     "Oper",
                     "sistema_origem": "Cbill",
                 })
@@ -318,7 +352,7 @@ if arquivo_cbill and arquivo_oper_com:
                     "servico":        row[col_srv_oper],
                     "tipo_servico":   str(row.get(col_tipo_oper, "")).strip(),
                     "situacao":       sit,
-                    "data_limite":    row[cols_oper_com["data"]].date() if pd.notna(row[cols_oper_com["data"]]) else data_filtro,
+                    "data_limite":    row[cols_oper_com["data"]].date() if pd.notna(row[cols_oper_com["data"]]) else data_inicio,
                     "ausente_em":     "Cbill",
                     "sistema_origem": "Oper",
                 })
@@ -341,7 +375,7 @@ if arquivo_cbill and arquivo_oper_com:
 
         # ── dashboard na sidebar ──
         with dash_placeholder.container():
-            st.markdown(f"**📅 {data_filtro.strftime('%d/%m/%Y')}**")
+            st.markdown(f"**📅 {label_periodo}**")
             st.markdown("---")
             st.markdown(f"🔵 **Cbill:** {total_cbill} serviços")
             st.markdown(f"🟠 **Oper:** {total_oper} serviços")
@@ -355,9 +389,9 @@ if arquivo_cbill and arquivo_oper_com:
         st.markdown("---")
 
         if df_resultado.empty:
-            st.success("✅ Nenhuma divergência encontrada! As bases estão alinhadas para esta data.")
+            st.success("✅ Nenhuma divergência encontrada! As bases estão alinhadas para este período.")
         else:
-            st.warning(f"⚠️ **{len(df_resultado)} serviço(s) divergente(s)** em {data_filtro.strftime('%d/%m/%Y')}")
+            st.warning(f"⚠️ **{len(df_resultado)} serviço(s) divergente(s)** no período {label_periodo}")
 
             tab1, tab2, tab3 = st.tabs([
                 f"📋 Todos ({len(df_resultado)})",
@@ -383,7 +417,12 @@ if arquivo_cbill and arquivo_oper_com:
                     st.info("Sem exclusivos.")
 
             st.markdown("---")
-            nome_saida = f"divergentes_{data_filtro.strftime('%d.%m')}_Cbill_vs_Oper.xlsx"
+            sufixo_arquivo = (
+                data_inicio.strftime("%d.%m")
+                if data_inicio == data_fim
+                else f"{data_inicio.strftime('%d.%m')}_a_{data_fim.strftime('%d.%m')}"
+            )
+            nome_saida = f"divergentes_{sufixo_arquivo}_Cbill_vs_Oper.xlsx"
             st.download_button(
                 label="⬇️ Baixar planilha de divergentes (.xlsx)",
                 data=exportar_excel(df_resultado),
@@ -392,7 +431,6 @@ if arquivo_cbill and arquivo_oper_com:
             )
 
         # ── expanders de visualização ──
-        # Adiciona coluna Situação na exibição do Oper
         base_oper_exib = base_oper.copy()
         if not tem_situacao:
             base_oper_exib["Situação"] = "—"
