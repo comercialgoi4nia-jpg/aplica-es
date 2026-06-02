@@ -1,448 +1,243 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from io import BytesIO
-from datetime import datetime, timedelta
+import io
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="Comparador de Bases", page_icon="🔍", layout="wide")
-
-# ─── mapeamento fixo de colunas por sistema ──────────────────────────────────
-COLUNAS_CBILL = {
-    "servico": "Serviço",
-    "data":    "Prazo de execução",
-    "tipo":    "Tipo Serviço",
-}
-
-COLUNAS_OPER = {
-    "servico":  "Numero",
-    "data":     "Data/Hora Limite",
-    "tipo":     "Subtipo",
-    "situacao": "Situação",
-}
-
-ALIASES_COLUNAS = {
-    "Data/Hora Limite":  ["Data/Hora Limite", "Data Limite", "Data limite", "DataHora Limite"],
-    "Numero":            ["Numero", "Número", "numero", "número"],
-    "Subtipo":           ["Subtipo", "subtipo"],
-    "Situação":          ["Situação", "Situacao", "situação", "situacao", "SITUAÇÃO"],
-    "Tipo Serviço":      ["Tipo Serviço", "Tipo Servico", "Tipo de Serviço", "Tipo de Servico"],
-    "Prazo de execução": ["Prazo de execução", "Prazo de Execução", "Prazo execução"],
-    "Serviço":           ["Serviço", "Servico", "serviço"],
-}
-
-# Lista de tipos excluídos do Oper
-TIPOS_EXCLUIDOS_OPER = [
-    "RESTABELECIMENTO FORNEC. NORMAL",
-    "RESTABELECIMENTO FORNEC. NORMAL - MUDANÇA TITULARIDADE",
+COLUNAS_NECESSARIAS = {"Subtipo", "Data Inclusão", "Numero", "Valor Faturas"}
+SUBTIPOS_P1 = [
+    "P1 SUSPENSÃO - GRUPO A",
+    "P1 SUSPENSÃO - POSTE",
+    "P1 VISTORIA - RETIRADA DE RAMAL",
 ]
 
-# ─── helpers ─────────────────────────────────────────────────────────────────
 
-def ler_excel(arquivo) -> pd.DataFrame:
-    nome = arquivo.name.lower()
-    conteudo = arquivo.read()
-    arquivo.seek(0)
-
-    amostra = conteudo[:10]
-    if amostra.startswith(b"<") or amostra.startswith(b"\xef\xbb\xbf<"):
-        for header_row in range(0, 8):
-            for flavor in ("lxml", "html5lib"):
-                try:
-                    todas = pd.read_html(BytesIO(conteudo), header=header_row, flavor=flavor)
-                except Exception:
-                    continue
-                for df in todas:
-                    df.columns = [str(c).strip() for c in df.columns]
-                    colunas_validas = [
-                        c for c in df.columns
-                        if c and not c.startswith("Unnamed") and c.lower() != "nan"
-                    ]
-                    if len(colunas_validas) >= 3:
-                        df = df.dropna(how="all").reset_index(drop=True)
-                        return df
-        return pd.DataFrame()
-
-    if nome.endswith(".xls"):
-        return pd.read_excel(BytesIO(conteudo), engine="xlrd")
-    else:
-        return pd.read_excel(BytesIO(conteudo), engine="openpyxl")
-
-
-def resolver_coluna(df: pd.DataFrame, col_canonica: str) -> str | None:
-    aliases = ALIASES_COLUNAS.get(col_canonica, [col_canonica])
-    for alias in aliases:
-        if alias in df.columns:
-            return alias
-    col_lower = col_canonica.lower()
-    for c in df.columns:
-        if c.lower() == col_lower:
-            return c
+def detectar_aba(xls: pd.ExcelFile) -> str | None:
+    """Retorna o nome da primeira aba que contenha as colunas necessárias."""
+    for sheet in xls.sheet_names:
+        try:
+            df = xls.parse(sheet, nrows=5)
+            if COLUNAS_NECESSARIAS.issubset(df.columns):
+                return sheet
+        except Exception:
+            continue
     return None
 
 
-def resolver_colunas(df: pd.DataFrame, mapa: dict) -> dict:
-    return {
-        chave: resolver_coluna(df, col_canonica) or col_canonica
-        for chave, col_canonica in mapa.items()
-    }
+def gerar_excel(tabela: pd.DataFrame) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Acomp. P1"
+
+    AZUL_HEADER = "2E5F9E"
+    AZUL_TITULO = "1F4E79"
+    BRANCO      = "FFFFFF"
+    CINZA_LINHA = "DEEAF1"
+
+    thin = Side(style="thin", color="AAAAAA")
+    borda = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # Título
+    ws.merge_cells("A1:F1")
+    c = ws["A1"]
+    c.value = "Acompanhamento de Suspensão/Vistoria P1"
+    c.font = Font(name="Arial", bold=True, color=BRANCO, size=13)
+    c.fill = PatternFill("solid", fgColor=AZUL_TITULO)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 22
+
+    # Cabeçalhos
+    headers = ["DATA", "P1 SUSPENSÃO - GRUPO A", "P1 SUSPENSÃO - POSTE",
+               "P1 VISTORIA - RETIRADA DE RAMAL", "Total Geral", "Total Dívida"]
+    for col_idx, h in enumerate(headers, start=1):
+        c = ws.cell(row=2, column=col_idx, value=h)
+        c.font = Font(name="Arial", bold=True, color=BRANCO, size=10)
+        c.fill = PatternFill("solid", fgColor=AZUL_HEADER)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = borda
+    ws.row_dimensions[2].height = 30
+
+    meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
+             "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
+
+    for i, row in enumerate(tabela.itertuples(index=False), start=3):
+        fill_cor = PatternFill("solid", fgColor=CINZA_LINHA if i % 2 == 0 else BRANCO)
+
+        data_str = row[0].strftime("%d/%b")
+        for en, pt in meses.items():
+            data_str = data_str.replace(en, pt)
+
+        c = ws.cell(row=i, column=1, value=data_str)
+        c.font = Font(name="Arial", size=10)
+        c.alignment = Alignment(horizontal="center")
+        c.fill = fill_cor
+        c.border = borda
+
+        for col_idx, val in enumerate([row[1], row[2], row[3], row[4]], start=2):
+            c = ws.cell(row=i, column=col_idx, value=int(val))
+            c.font = Font(name="Arial", size=10, bold=(col_idx == 5))
+            c.alignment = Alignment(horizontal="center")
+            c.fill = fill_cor
+            c.border = borda
+
+        c = ws.cell(row=i, column=6, value=row[5])
+        c.number_format = 'R$ #,##0.00'
+        c.font = Font(name="Arial", size=10)
+        c.alignment = Alignment(horizontal="right")
+        c.fill = fill_cor
+        c.border = borda
+
+    # Linha Total Geral
+    total_row = ws.max_row + 1
+    data_start, data_end = 3, total_row - 1
+    ws.cell(row=total_row, column=1, value="Total Geral").font = Font(name="Arial", bold=True, color=BRANCO, size=10)
+    ws.cell(row=total_row, column=1).fill = PatternFill("solid", fgColor=AZUL_HEADER)
+    ws.cell(row=total_row, column=1).alignment = Alignment(horizontal="center")
+    ws.cell(row=total_row, column=1).border = borda
+
+    for col_idx, col_letter in enumerate(["B","C","D","E","F"], start=2):
+        c = ws.cell(row=total_row, column=col_idx)
+        c.value = f"=SUM({col_letter}{data_start}:{col_letter}{data_end})"
+        c.font = Font(name="Arial", bold=True, color=BRANCO, size=10)
+        c.fill = PatternFill("solid", fgColor=AZUL_HEADER)
+        c.alignment = Alignment(horizontal="center" if col_idx < 6 else "right")
+        c.border = borda
+        if col_idx == 6:
+            c.number_format = 'R$ #,##0.00'
+
+    for i, w in enumerate([12, 26, 22, 34, 14, 18], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
-def validar_colunas_obrigatorias(df: pd.DataFrame, cols: dict, nome_arquivo: str) -> bool:
-    obrigatorias = {k: v for k, v in cols.items() if k != "situacao"}
-    ausentes = [v for v in obrigatorias.values() if v not in df.columns]
-    if ausentes:
-        st.error(
-            f"❌ **{nome_arquivo}** — colunas não encontradas: `{'`, `'.join(ausentes)}`\n\n"
-            f"Colunas disponíveis: `{'`, `'.join(df.columns.tolist())}`"
-        )
-        return False
-    return True
+# ── UI ──────────────────────────────────────────────────────────────────────
 
+st.set_page_config(page_title="Acompanhamento Suspensão/Vistoria P1", layout="wide")
+st.title("📋 Acompanhamento de Suspensão/Vistoria P1")
 
-def normalizar_datas(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    df[col] = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
-    return df
+uploaded_file = st.file_uploader(
+    "Suba a base (.xlsx)",
+    type=["xlsx"],
+    help="Apenas arquivos no formato .xlsx são aceitos.",
+)
 
+if uploaded_file is not None:
+    # Validar extensão explicitamente
+    if not uploaded_file.name.lower().endswith(".xlsx"):
+        st.error("⚠️ Formato inválido! Por favor, suba apenas arquivos **.xlsx**.")
+        st.stop()
 
-def deduplicar(df: pd.DataFrame, col_servico: str, nome_base: str) -> pd.DataFrame:
-    total_antes = len(df)
-    df = df.drop_duplicates(subset=[col_servico], keep="first").reset_index(drop=True)
-    removidos = total_antes - len(df)
-    if removidos > 0:
-        st.info(f"🔁 **{nome_base}:** {removidos} duplicata(s) removida(s) ({total_antes} → {len(df)} registros)")
-    return df
-
-
-def exportar_excel(df: pd.DataFrame) -> bytes:
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Divergentes")
-        ws = writer.sheets["Divergentes"]
-        for col_cells in ws.columns:
-            max_len = max(len(str(c.value)) if c.value else 0 for c in col_cells)
-            ws.column_dimensions[col_cells[0].column_letter].width = max(max_len + 4, 14)
-    return buf.getvalue()
-
-
-def gauge(titulo: str, valor: float, cor: str) -> go.Figure:
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=valor,
-        number={"suffix": "%", "font": {"size": 28}},
-        title={"text": titulo, "font": {"size": 14}},
-        gauge={
-            "axis": {"range": [0, 100], "tickwidth": 1},
-            "bar":  {"color": cor},
-            "steps": [
-                {"range": [0,  30], "color": "#d4edda"},
-                {"range": [30, 60], "color": "#fff3cd"},
-                {"range": [60, 100], "color": "#f8d7da"},
-            ],
-            "threshold": {
-                "line": {"color": "black", "width": 3},
-                "thickness": 0.75,
-                "value": valor,
-            },
-        },
-    ))
-    fig.update_layout(margin=dict(t=60, b=20, l=20, r=20), height=230)
-    return fig
-
-
-def grafico_barras(n_cbill: int, n_oper: int, s_cbill: int, s_oper: int) -> go.Figure:
-    categorias = ["Total Cbill", "Total Oper", "Só no Cbill", "Só no Oper"]
-    valores    = [n_cbill,       n_oper,        s_cbill,       s_oper]
-    cores      = ["#4e8cff", "#ff8c42", "#c0392b", "#e67e22"]
-
-    fig = go.Figure(go.Bar(
-        x=categorias,
-        y=valores,
-        marker_color=cores,
-        text=valores,
-        textposition="outside",
-    ))
-    fig.update_layout(
-        title="Visão geral — Cbill vs Oper",
-        yaxis_title="Qtd. de serviços",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=50, b=40, l=40, r=20),
-        height=350,
-    )
-    return fig
-
-# ─── sidebar com abas ────────────────────────────────────────────────────────
-
-aba_config, aba_dash = st.sidebar.tabs(["⚙️ Configurações", "📊 Dashboard"])
-
-with aba_config:
-    # ── Modo de filtro de data ──
-    modo_data = st.radio(
-        "Modo de filtro de data",
-        ["📅 Dia único", "📆 Intervalo de datas"],
-        horizontal=True,
-    )
-
-    if modo_data == "📅 Dia único":
-        data_inicio = st.date_input("Data a comparar", value=datetime.today())
-        data_fim = data_inicio
-        label_periodo = data_inicio.strftime("%d/%m/%Y")
-    else:
-        col_di, col_df = st.columns(2)
-        with col_di:
-            data_inicio = st.date_input("Data início", value=datetime.today())
-        with col_df:
-            data_fim = st.date_input("Data fim", value=datetime.today() + timedelta(days=6))
-        if data_fim < data_inicio:
-            st.error("⚠️ A data fim deve ser igual ou posterior à data início.")
-            st.stop()
-        label_periodo = f"{data_inicio.strftime('%d/%m/%Y')} → {data_fim.strftime('%d/%m/%Y')}"
-
-    st.markdown("---")
-    st.markdown("**Colunas utilizadas:**")
-    st.markdown("🔵 **Cbill:** `Serviço` · `Prazo de execução` · `Tipo Serviço`")
-    st.markdown("🟠 **Oper:** `Numero` · `Data/Hora Limite` · `Subtipo` · `Situação`")
-    st.markdown("---")
-    st.markdown("**Filtros automáticos Oper:**")
-    for t in TIPOS_EXCLUIDOS_OPER:
-        st.markdown(f"🚫 `{t}`")
-    st.markdown("---")
-    st.info(
-        "💡 **Padrão de nomes esperado:**\n"
-        "`base_DD.MM_Cbill.xlsx`\n"
-        "`base_DD.MM_oper.xls` _(Comercial)_\n"
-        "`base_gd_DD.MM_oper.xls` _(GD)_"
-    )
-
-# placeholder para o dashboard (preenchido após processamento)
-dash_placeholder = aba_dash.empty()
-dash_placeholder.info("📂 Faça upload das bases para visualizar o dashboard.")
-
-# ─── título principal ────────────────────────────────────────────────────────
-
-st.title("🔍 Comparador de Bases — Serviços Divergentes")
-st.markdown("Carregue as bases **Cbill** e **Oper** para identificar serviços divergentes por data limite.")
-
-# ─── upload ───────────────────────────────────────────────────────────────────
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("📂 Base Cbill")
-    arquivo_cbill = st.file_uploader("Selecione a base Cbill", type=["xlsx", "xls"], key="cbill")
-
-with col2:
-    st.subheader("📂 Base Oper")
-    arquivo_oper_com = st.file_uploader("Base Oper — Comercial", type=["xlsx", "xls"], key="oper_com")
-    arquivo_oper_gd  = st.file_uploader("Base Oper — GD (opcional)", type=["xlsx", "xls"], key="oper_gd")
-
-# ─── processamento ────────────────────────────────────────────────────────────
-
-if arquivo_cbill and arquivo_oper_com:
     try:
-        with st.spinner("Carregando bases..."):
-            df_cbill    = ler_excel(arquivo_cbill)
-            df_oper_com = ler_excel(arquivo_oper_com)
-            df_oper_gd  = ler_excel(arquivo_oper_gd) if arquivo_oper_gd else pd.DataFrame()
+        xls = pd.ExcelFile(uploaded_file)
+        aba = detectar_aba(xls)
 
-        # ── resolve colunas ──
-        cols_cbill    = resolver_colunas(df_cbill,    COLUNAS_CBILL)
-        cols_oper_com = resolver_colunas(df_oper_com, COLUNAS_OPER)
-
-        if not validar_colunas_obrigatorias(df_cbill, cols_cbill, arquivo_cbill.name):
-            st.stop()
-        if not validar_colunas_obrigatorias(df_oper_com, cols_oper_com, arquivo_oper_com.name):
+        if aba is None:
+            abas = ", ".join(xls.sheet_names)
+            st.error(
+                f"❌ Nenhuma aba válida encontrada no arquivo.\n\n"
+                f"Abas encontradas: **{abas}**\n\n"
+                f"O arquivo precisa ter as colunas: {', '.join(sorted(COLUNAS_NECESSARIAS))}"
+            )
             st.stop()
 
-        # ── deduplica ──
-        df_cbill    = deduplicar(df_cbill,    cols_cbill["servico"],    "Cbill")
-        df_oper_com = deduplicar(df_oper_com, cols_oper_com["servico"], "Oper Comercial")
+        st.success(f"✅ Base carregada com sucesso! Aba utilizada: **{aba}**")
 
-        # ── normaliza datas ──
-        df_cbill    = normalizar_datas(df_cbill,    cols_cbill["data"])
-        df_oper_com = normalizar_datas(df_oper_com, cols_oper_com["data"])
+        df = xls.parse(aba)
 
-        # ── processa e une GD se enviada ──
-        if not df_oper_gd.empty:
-            cols_oper_gd = resolver_colunas(df_oper_gd, COLUNAS_OPER)
-            if not validar_colunas_obrigatorias(df_oper_gd, cols_oper_gd, arquivo_oper_gd.name):
-                st.stop()
-            df_oper_gd = deduplicar(df_oper_gd, cols_oper_gd["servico"], "Oper GD")
-            df_oper_gd = normalizar_datas(df_oper_gd, cols_oper_gd["data"])
+        # Filtrar subtipos P1
+        df_p1 = df[df["Subtipo"].isin(SUBTIPOS_P1)].copy()
+        df_p1["Data Inclusão"] = pd.to_datetime(df_p1["Data Inclusão"]).dt.date
 
-            rename_gd = {
-                cols_oper_gd["servico"]:  cols_oper_com["servico"],
-                cols_oper_gd["data"]:     cols_oper_com["data"],
-                cols_oper_gd["tipo"]:     cols_oper_com["tipo"],
-            }
-            col_sit_gd  = cols_oper_gd.get("situacao")
-            col_sit_com = cols_oper_com.get("situacao")
-            if col_sit_gd and col_sit_gd in df_oper_gd.columns and col_sit_com:
-                rename_gd[col_sit_gd] = col_sit_com
+        # Pivot: contagem por dia e subtipo
+        pivot_qtd = (
+            df_p1.groupby(["Data Inclusão", "Subtipo"])["Numero"]
+            .count()
+            .unstack(fill_value=0)
+            .reindex(columns=SUBTIPOS_P1, fill_value=0)
+        )
+        pivot_qtd["Total Geral"] = pivot_qtd.sum(axis=1)
 
-            df_oper_gd   = df_oper_gd.rename(columns=rename_gd)
-            df_oper_full = pd.concat([df_oper_com, df_oper_gd], ignore_index=True)
-        else:
-            df_oper_full = df_oper_com.copy()
+        # Dívida por dia
+        divida_dia = (
+            df_p1.groupby("Data Inclusão")["Valor Faturas"]
+            .sum()
+            .rename("Total Dívida")
+        )
 
-        # ── filtra pelo intervalo de datas ──
-        ts_inicio = pd.Timestamp(data_inicio)
-        ts_fim    = pd.Timestamp(data_fim) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        tabela = pivot_qtd.join(divida_dia).reset_index().rename(columns={"Data Inclusão": "DATA"}).sort_values("DATA")
 
-        base_cbill = df_cbill[
-            (df_cbill[cols_cbill["data"]] >= ts_inicio) &
-            (df_cbill[cols_cbill["data"]] <= ts_fim)
-        ].copy()
+        # ── Métricas ──
+        st.subheader("Resumo do Período")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("P1 Suspensão - Grupo A",   int(pivot_qtd["P1 SUSPENSÃO - GRUPO A"].sum()))
+        col2.metric("P1 Suspensão - Poste",      int(pivot_qtd["P1 SUSPENSÃO - POSTE"].sum()))
+        col3.metric("P1 Vistoria - Ret. Ramal",  int(pivot_qtd["P1 VISTORIA - RETIRADA DE RAMAL"].sum()))
+        total_fmt = f"R$ {divida_dia.sum():,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        col4.metric("Total Dívida", total_fmt)
 
-        base_oper = df_oper_full[
-            (df_oper_full[cols_oper_com["data"]] >= ts_inicio) &
-            (df_oper_full[cols_oper_com["data"]] <= ts_fim)
-        ].copy()
+        st.divider()
 
-        # ── remove tipos excluídos apenas do Oper ──
-        col_tipo_oper = cols_oper_com["tipo"]
-        tipos_upper   = [t.upper() for t in TIPOS_EXCLUIDOS_OPER]
-        base_oper = base_oper[
-            ~base_oper[col_tipo_oper].astype(str).str.strip().str.upper().isin(tipos_upper)
-        ].copy()
+        # ── Tabela + botão download ──
+        col_titulo, col_btn = st.columns([4, 1])
+        col_titulo.subheader("Detalhamento por Dia")
+        excel_bytes = gerar_excel(tabela)
+        col_btn.download_button(
+            label="⬇️ Baixar Excel",
+            data=excel_bytes,
+            file_name="acompanhamento_suspensao_p1.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
-        total_cbill = len(base_cbill)
-        total_oper  = len(base_oper)
+        # Tabela formatada para exibição
+        tabela_exibir = tabela.copy()
+        meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
+                 "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
+        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
+            lambda x: "".join(
+                meses.get(x.strftime("%b"), x.strftime("%b")) if i == 1 else p
+                for i, p in enumerate(x.strftime("%d/%b").split("/"))
+            ) if hasattr(x, "strftime") else str(x)
+        )
+        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
+            lambda x: x[:3] + "/" + "".join(meses.get(x[3:], x[3:])) if hasattr(x, "split") else x
+        )
+        tabela_exibir["DATA"] = tabela["DATA"].apply(
+            lambda x: x.strftime("%d/") + meses.get(x.strftime("%b"), x.strftime("%b"))
+            if hasattr(x, "strftime") else str(x)
+        )
+        tabela_exibir["Total Dívida"] = tabela["Total Dívida"].apply(
+            lambda x: f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        )
 
-        # ── métricas ──
-        st.markdown("---")
-        st.markdown(f"### 📅 Período analisado: **{label_periodo}**")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Serviços Cbill", total_cbill)
-        m2.metric("Serviços Oper (sem Restab.)", total_oper)
-        m3.metric("Diferença", abs(total_cbill - total_oper))
+        # Linha Total Geral
+        totais = tabela.drop(columns="DATA").sum()
+        totais_fmt = totais.copy()
+        totais_fmt["Total Dívida"] = f"R$ {totais['Total Dívida']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        totais_row = pd.DataFrame([["Total Geral"] + totais_fmt.tolist()], columns=tabela_exibir.columns)
+        tabela_exibir = pd.concat([tabela_exibir, totais_row], ignore_index=True)
 
-        # ── identifica divergências ──
-        col_srv_cbill  = cols_cbill["servico"]
-        col_srv_oper   = cols_oper_com["servico"]
-        col_tipo_cbill = cols_cbill["tipo"]
-        col_sit_oper   = cols_oper_com.get("situacao")
-        tem_situacao   = col_sit_oper and col_sit_oper in base_oper.columns
-
-        srvs_cbill = set(base_cbill[col_srv_cbill].astype(str).str.strip())
-        srvs_oper  = set(base_oper[col_srv_oper].astype(str).str.strip())
-
-        apenas_cbill = srvs_cbill - srvs_oper
-        apenas_oper  = srvs_oper  - srvs_cbill
-
-        registros = []
-
-        for srv in sorted(apenas_cbill):
-            linhas = base_cbill[base_cbill[col_srv_cbill].astype(str).str.strip() == srv]
-            for _, row in linhas.iterrows():
-                registros.append({
-                    "servico":        row[col_srv_cbill],
-                    "tipo_servico":   str(row.get(col_tipo_cbill, "")).strip(),
-                    "situacao":       "—",
-                    "data_limite":    row[cols_cbill["data"]].date() if pd.notna(row[cols_cbill["data"]]) else data_inicio,
-                    "ausente_em":     "Oper",
-                    "sistema_origem": "Cbill",
-                })
-
-        for srv in sorted(apenas_oper):
-            linhas = base_oper[base_oper[col_srv_oper].astype(str).str.strip() == srv]
-            for _, row in linhas.iterrows():
-                sit = str(row[col_sit_oper]).strip() if tem_situacao else "—"
-                registros.append({
-                    "servico":        row[col_srv_oper],
-                    "tipo_servico":   str(row.get(col_tipo_oper, "")).strip(),
-                    "situacao":       sit,
-                    "data_limite":    row[cols_oper_com["data"]].date() if pd.notna(row[cols_oper_com["data"]]) else data_inicio,
-                    "ausente_em":     "Cbill",
-                    "sistema_origem": "Oper",
-                })
-
-        df_resultado = pd.DataFrame(registros)
-
-        # ── cálculo dos gauges ──
-        total_universo = total_cbill + total_oper
-        n_div          = len(apenas_cbill) + len(apenas_oper)
-        pct_geral      = round(n_div / total_universo * 100, 1) if total_universo else 0
-        pct_cbill_fora = round(len(apenas_cbill) / total_cbill * 100, 1) if total_cbill else 0
-        pct_oper_fora  = round(len(apenas_oper)  / total_oper  * 100, 1) if total_oper  else 0
-
-        # ── três gauges no topo ──
-        st.markdown("---")
-        g1, g2, g3 = st.columns(3)
-        g1.plotly_chart(gauge("% Divergência Geral",       pct_geral,      "#6c63ff"), use_container_width=True)
-        g2.plotly_chart(gauge("% Cbill ausente no Oper",   pct_cbill_fora, "#e74c3c"), use_container_width=True)
-        g3.plotly_chart(gauge("% Oper ausente no Cbill",   pct_oper_fora,  "#e67e22"), use_container_width=True)
-
-        # ── dashboard na sidebar ──
-        with dash_placeholder.container():
-            st.markdown(f"**📅 {label_periodo}**")
-            st.markdown("---")
-            st.markdown(f"🔵 **Cbill:** {total_cbill} serviços")
-            st.markdown(f"🟠 **Oper:** {total_oper} serviços")
-            st.markdown(f"⚠️ **Divergentes:** {n_div}")
-            st.markdown("---")
-            st.plotly_chart(
-                grafico_barras(total_cbill, total_oper, len(apenas_cbill), len(apenas_oper)),
-                use_container_width=True,
-            )
-
-        st.markdown("---")
-
-        if df_resultado.empty:
-            st.success("✅ Nenhuma divergência encontrada! As bases estão alinhadas para este período.")
-        else:
-            st.warning(f"⚠️ **{len(df_resultado)} serviço(s) divergente(s)** no período {label_periodo}")
-
-            tab1, tab2, tab3 = st.tabs([
-                f"📋 Todos ({len(df_resultado)})",
-                f"🔵 Só no Cbill ({len(apenas_cbill)})",
-                f"🟠 Só no Oper ({len(apenas_oper)})",
-            ])
-
-            with tab1:
-                st.dataframe(df_resultado, use_container_width=True)
-
-            with tab2:
-                sub = df_resultado[df_resultado["sistema_origem"] == "Cbill"]
-                if not sub.empty:
-                    st.dataframe(sub, use_container_width=True)
-                else:
-                    st.info("Sem exclusivos.")
-
-            with tab3:
-                sub = df_resultado[df_resultado["sistema_origem"] == "Oper"]
-                if not sub.empty:
-                    st.dataframe(sub, use_container_width=True)
-                else:
-                    st.info("Sem exclusivos.")
-
-            st.markdown("---")
-            sufixo_arquivo = (
-                data_inicio.strftime("%d.%m")
-                if data_inicio == data_fim
-                else f"{data_inicio.strftime('%d.%m')}_a_{data_fim.strftime('%d.%m')}"
-            )
-            nome_saida = f"divergentes_{sufixo_arquivo}_Cbill_vs_Oper.xlsx"
-            st.download_button(
-                label="⬇️ Baixar planilha de divergentes (.xlsx)",
-                data=exportar_excel(df_resultado),
-                file_name=nome_saida,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-        # ── expanders de visualização ──
-        base_oper_exib = base_oper.copy()
-        if not tem_situacao:
-            base_oper_exib["Situação"] = "—"
-
-        with st.expander(f"👁️ Ver base Cbill filtrada ({total_cbill} registros)"):
-            st.dataframe(base_cbill, use_container_width=True)
-        with st.expander(f"👁️ Ver base Oper filtrada ({total_oper} registros, sem Restabelecimento)"):
-            st.dataframe(base_oper_exib, use_container_width=True)
+        st.dataframe(
+            tabela_exibir,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "DATA": st.column_config.TextColumn("DATA"),
+                "P1 SUSPENSÃO - GRUPO A": st.column_config.NumberColumn("P1 SUSPENSÃO - GRUPO A"),
+                "P1 SUSPENSÃO - POSTE": st.column_config.NumberColumn("P1 SUSPENSÃO - POSTE"),
+                "P1 VISTORIA - RETIRADA DE RAMAL": st.column_config.NumberColumn("P1 VISTORIA - RETIRADA DE RAMAL"),
+                "Total Geral": st.column_config.NumberColumn("Total Geral"),
+                "Total Dívida": st.column_config.TextColumn("Total Dívida"),
+            },
+        )
 
     except Exception as e:
-        st.error(f"❌ Erro ao processar: {e}")
-        st.exception(e)
+        st.error(f"Erro ao processar o arquivo: {e}")
 
 else:
-    st.info("👆 Faça upload da base Cbill e ao menos da base Oper Comercial para iniciar a comparação.")
+    st.info("👆 Suba um arquivo .xlsx para começar.")
