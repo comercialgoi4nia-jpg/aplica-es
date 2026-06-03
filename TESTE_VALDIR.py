@@ -263,7 +263,30 @@ def validar_colunas_obrigatorias(df: pd.DataFrame, cols: dict, nome_arquivo: str
 
 
 def normalizar_datas(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    df[col] = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+    """
+    Converte a coluna para datetime detectando o formato automaticamente.
+
+    Problema: pd.to_datetime com dayfirst=True interpreta '2026-06-11' como
+    6 de novembro em vez de 11 de junho, porque trata o segundo segmento como dia.
+
+    Estratégia:
+      1. Tenta formato ISO (YYYY-MM-DD / YYYY-MM-DDTHH:MM:SS) — sem dayfirst.
+      2. Para os valores que ainda ficaram nulos, tenta dayfirst=True
+         (cobre datas no formato brasileiro DD/MM/YYYY).
+    """
+    serie = df[col].astype(str).str.strip()
+
+    # Passo 1: formato ISO — o padrão do XML SpreadsheetML
+    resultado = pd.to_datetime(serie, format="ISO8601", errors="coerce")
+
+    # Passo 2: fallback para formato brasileiro (DD/MM/YYYY ou DD/MM/YYYY HH:MM)
+    mascara_nulos = resultado.isna() & serie.ne("") & serie.ne("nan") & serie.ne("NaT")
+    if mascara_nulos.any():
+        fallback = pd.to_datetime(serie[mascara_nulos], dayfirst=True, errors="coerce")
+        resultado = resultado.copy()
+        resultado[mascara_nulos] = fallback
+
+    df[col] = resultado
     return df
 
 
