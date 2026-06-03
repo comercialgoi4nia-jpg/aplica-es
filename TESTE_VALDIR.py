@@ -79,15 +79,18 @@ def ler_xml(conteudo: bytes) -> pd.DataFrame:
                 raise ValueError("SpreadsheetML: nenhuma linha encontrada na tabela.")
 
             # Primeira linha = cabeçalho
+            # Após o parse do ElementTree, ss:Index vira o atributo com namespace completo
+            ATTR_INDEX = f"{{{NS}}}Index"
+
             def celulas(row_el):
                 vals = []
-                idx = 0
+                idx = 0  # posição atual (0-based)
                 for cell in row_el.findall(tag("Cell")):
-                    # ss:Index permite pular colunas
-                    ss_idx = cell.get(tag("Index"))
+                    # ss:Index é 1-based: indica a posição absoluta da célula
+                    ss_idx = cell.get(ATTR_INDEX)
                     if ss_idx:
-                        # preenche lacunas com string vazia
-                        while idx < int(ss_idx) - 1:
+                        alvo = int(ss_idx) - 1  # converte para 0-based
+                        while idx < alvo:
                             vals.append("")
                             idx += 1
                     data_el = cell.find(tag("Data"))
