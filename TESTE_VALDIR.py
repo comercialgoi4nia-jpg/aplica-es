@@ -41,50 +41,124 @@ TIPOS_EXCLUIDOS_OPER = [
 
 def ler_xml(conteudo: bytes) -> pd.DataFrame:
     """
-    Lê um arquivo XML e tenta transformá-lo em DataFrame.
-    Suporta dois padrões comuns:
-      1. Raiz com elementos filhos repetidos (linhas), cada filho com sub-elementos (colunas).
-      2. Atributos nos elementos filhos como colunas.
+    Lê XML e retorna DataFrame.
+
+    Suporta três formatos:
+      1. SpreadsheetML — XML gerado pelo Excel/Office com namespace
+         urn:schemas-microsoft-com:office:spreadsheet  (ex.: exportações do Oper)
+      2. XML genérico com sub-elementos como colunas
+         <root><row><Col1>val</Col1></row></root>
+      3. XML genérico com atributos como colunas
+         <root><row Col1="val"/></root>
     """
     try:
         root = ET.fromstring(conteudo)
     except ET.ParseError as e:
         raise ValueError(f"XML inválido: {e}")
 
-    # Detecta os elementos "linha" — filhos do root ou netos
+    # ── 1. SpreadsheetML (namespace Office/Excel) ──────────────────────────
+    NS = "urn:schemas-microsoft-com:office:spreadsheet"
+
+    def tag(nome):
+        return f"{{{NS}}}{nome}"
+
+    # Procura a primeira Worksheet com uma Table
+    worksheet = root.find(f".//{tag('Worksheet')}")
+    if worksheet is not None:
+        table = worksheet.find(tag("Table"))
+        if table is None:
+            # Tenta em qualquer Worksheet
+            for ws in root.iter(tag("Worksheet")):
+                table = ws.find(tag("Table"))
+                if table is not None:
+                    break
+
+        if table is not None:
+            linhas = list(table.findall(tag("Row")))
+            if not linhas:
+                raise ValueError("SpreadsheetML: nenhuma linha encontrada na tabela.")
+
+            # Primeira linha = cabeçalho
+            def celulas(row_el):
+                vals = []
+                idx = 0
+                for cell in row_el.findall(tag("Cell")):
+                    # ss:Index permite pular colunas
+                    ss_idx = cell.get(tag("Index"))
+                    if ss_idx:
+                        # preenche lacunas com string vazia
+                        while idx < int(ss_idx) - 1:
+                            vals.append("")
+                            idx += 1
+                    data_el = cell.find(tag("Data"))
+                    vals.append((data_el.text or "").strip() if data_el is not None else "")
+                    idx += 1
+                return vals
+
+            cabecalho = celulas(linhas[0])
+            # Normaliza colunas duplicadas ou vazias
+            cab_norm = []
+            contagem: dict = {}
+            for c in cabecalho:
+                c = c.strip() if c.strip() else f"_col{len(cab_norm)}"
+                contagem[c] = contagem.get(c, 0) + 1
+                cab_norm.append(c if contagem[c] == 1 else f"{c}_{contagem[c]}")
+
+            registros = []
+            for row_el in linhas[1:]:
+                vals = celulas(row_el)
+                # Alinha ao tamanho do cabeçalho
+                while len(vals) < len(cab_norm):
+                    vals.append("")
+                registros.append(dict(zip(cab_norm, vals[:len(cab_norm)])))
+
+            if not registros:
+                raise ValueError("SpreadsheetML: tabela sem linhas de dados.")
+
+            df = pd.DataFrame(registros)
+            df.columns = [str(c).strip() for c in df.columns]
+            # Remove linhas completamente vazias
+            df = df[df.apply(lambda r: any(str(v).strip() for v in r), axis=1)].reset_index(drop=True)
+            return df
+
+    # ── 2 & 3. XML genérico ────────────────────────────────────────────────
     filhos = list(root)
     if not filhos:
         raise ValueError("XML sem elementos filhos na raiz.")
 
-    # Verifica se os filhos têm sub-elementos (colunas como tags) ou atributos
-    amostra = filhos[0]
-    sub_elementos = list(amostra)
+    # Desce até o nível com mais filhos repetidos (linhas de dados)
+    candidatos = filhos
+    for _ in range(3):
+        netos = []
+        for f in candidatos:
+            netos.extend(list(f))
+        if len(netos) > len(candidatos):
+            candidatos = netos
+        else:
+            break
 
+    amostra = candidatos[0]
     registros = []
 
-    if sub_elementos:
-        # Padrão: <root><linha><Coluna1>val</Coluna1><Coluna2>val</Coluna2></linha>...</root>
-        for filho in filhos:
-            registro = {sub.tag: (sub.text or "").strip() for sub in filho}
+    if list(amostra):
+        # Sub-elementos como colunas — remove namespace das tags
+        def limpar_tag(t):
+            return t.split("}")[-1] if "}" in t else t
+
+        for filho in candidatos:
+            registro = {limpar_tag(sub.tag): (sub.text or "").strip() for sub in filho}
             if registro:
                 registros.append(registro)
     elif amostra.attrib:
-        # Padrão: <root><linha Col1="val" Col2="val"/></root>
-        for filho in filhos:
+        for filho in candidatos:
             if filho.attrib:
                 registros.append(dict(filho.attrib))
-    else:
-        # Tenta um nível mais fundo (netos como linhas)
-        for filho in filhos:
-            for neto in filho:
-                registro = {sub.tag: (sub.text or "").strip() for sub in neto}
-                if not registro and neto.attrib:
-                    registro = dict(neto.attrib)
-                if registro:
-                    registros.append(registro)
 
     if not registros:
-        raise ValueError("Não foi possível extrair registros do XML.")
+        raise ValueError(
+            "Não foi possível extrair registros do XML. "
+            "Verifique se o arquivo possui dados tabulares."
+        )
 
     df = pd.DataFrame(registros)
     df.columns = [str(c).strip() for c in df.columns]
