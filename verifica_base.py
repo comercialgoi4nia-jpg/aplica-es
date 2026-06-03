@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime, timedelta
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="Comparador de Bases", page_icon="🔍", layout="wide")
 
@@ -38,11 +39,172 @@ TIPOS_EXCLUIDOS_OPER = [
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
-def ler_excel(arquivo) -> pd.DataFrame:
+def ler_xml(conteudo: bytes) -> pd.DataFrame:
+    """
+    Lê XML e retorna DataFrame.
+
+    Suporta três formatos:
+      1. SpreadsheetML — XML gerado pelo Excel/Office com namespace
+         urn:schemas-microsoft-com:office:spreadsheet  (ex.: exportações do Oper)
+      2. XML genérico com sub-elementos como colunas
+         <root><row><Col1>val</Col1></row></root>
+      3. XML genérico com atributos como colunas
+         <root><row Col1="val"/></root>
+    """
+    try:
+        root = ET.fromstring(conteudo)
+    except ET.ParseError as e:
+        raise ValueError(f"XML inválido: {e}")
+
+    # ── 1. SpreadsheetML (namespace Office/Excel) ──────────────────────────
+    NS = "urn:schemas-microsoft-com:office:spreadsheet"
+
+    def tag(nome):
+        return f"{{{NS}}}{nome}"
+
+    # Procura a primeira Worksheet com uma Table
+    worksheet = root.find(f".//{tag('Worksheet')}")
+    if worksheet is not None:
+        table = worksheet.find(tag("Table"))
+        if table is None:
+            # Tenta em qualquer Worksheet
+            for ws in root.iter(tag("Worksheet")):
+                table = ws.find(tag("Table"))
+                if table is not None:
+                    break
+
+        if table is not None:
+            linhas = list(table.findall(tag("Row")))
+            if not linhas:
+                raise ValueError("SpreadsheetML: nenhuma linha encontrada na tabela.")
+
+            # Primeira linha = cabeçalho
+            # Após o parse do ElementTree, ss:Index vira o atributo com namespace completo
+            ATTR_INDEX = f"{{{NS}}}Index"
+
+            def celulas(row_el):
+                vals = []
+                idx = 0  # posição atual (0-based)
+                for cell in row_el.findall(tag("Cell")):
+                    # ss:Index é 1-based: indica a posição absoluta da célula
+                    ss_idx = cell.get(ATTR_INDEX)
+                    if ss_idx:
+                        alvo = int(ss_idx) - 1  # converte para 0-based
+                        while idx < alvo:
+                            vals.append("")
+                            idx += 1
+                    data_el = cell.find(tag("Data"))
+                    vals.append((data_el.text or "").strip() if data_el is not None else "")
+                    idx += 1
+                return vals
+
+            cabecalho = celulas(linhas[0])
+            # Normaliza colunas duplicadas ou vazias
+            cab_norm = []
+            contagem: dict = {}
+            for c in cabecalho:
+                c = c.strip() if c.strip() else f"_col{len(cab_norm)}"
+                contagem[c] = contagem.get(c, 0) + 1
+                cab_norm.append(c if contagem[c] == 1 else f"{c}_{contagem[c]}")
+
+            registros = []
+            for row_el in linhas[1:]:
+                vals = celulas(row_el)
+                # Alinha ao tamanho do cabeçalho
+                while len(vals) < len(cab_norm):
+                    vals.append("")
+                registros.append(dict(zip(cab_norm, vals[:len(cab_norm)])))
+
+            if not registros:
+                raise ValueError("SpreadsheetML: tabela sem linhas de dados.")
+
+            df = pd.DataFrame(registros)
+            df.columns = [str(c).strip() for c in df.columns]
+            # Remove linhas completamente vazias
+            df = df[df.apply(lambda r: any(str(v).strip() for v in r), axis=1)].reset_index(drop=True)
+            return df
+
+    # ── 2 & 3. XML genérico ────────────────────────────────────────────────
+    filhos = list(root)
+    if not filhos:
+        raise ValueError("XML sem elementos filhos na raiz.")
+
+    # Desce até o nível com mais filhos repetidos (linhas de dados)
+    candidatos = filhos
+    for _ in range(3):
+        netos = []
+        for f in candidatos:
+            netos.extend(list(f))
+        if len(netos) > len(candidatos):
+            candidatos = netos
+        else:
+            break
+
+    amostra = candidatos[0]
+    registros = []
+
+    if list(amostra):
+        # Sub-elementos como colunas — remove namespace das tags
+        def limpar_tag(t):
+            return t.split("}")[-1] if "}" in t else t
+
+        for filho in candidatos:
+            registro = {limpar_tag(sub.tag): (sub.text or "").strip() for sub in filho}
+            if registro:
+                registros.append(registro)
+    elif amostra.attrib:
+        for filho in candidatos:
+            if filho.attrib:
+                registros.append(dict(filho.attrib))
+
+    if not registros:
+        raise ValueError(
+            "Não foi possível extrair registros do XML. "
+            "Verifique se o arquivo possui dados tabulares."
+        )
+
+    df = pd.DataFrame(registros)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def ler_arquivo(arquivo) -> pd.DataFrame:
+    """
+    Lê qualquer arquivo suportado (xlsx, xls, xml, docx) e retorna DataFrame.
+    A origem (Cbill / Oper) é determinada pela caixa de upload, não pelo nome.
+    """
     nome = arquivo.name.lower()
     conteudo = arquivo.read()
     arquivo.seek(0)
 
+    # ── XML ──
+    if nome.endswith(".xml"):
+        return ler_xml(conteudo)
+
+    # ── DOCX — extrai tabelas ──
+    if nome.endswith(".docx"):
+        try:
+            from docx import Document
+            doc = Document(BytesIO(conteudo))
+            frames = []
+            for tabela in doc.tables:
+                cabecalho = [cell.text.strip() for cell in tabela.rows[0].cells]
+                linhas = []
+                for linha in tabela.rows[1:]:
+                    linhas.append([cell.text.strip() for cell in linha.cells])
+                if linhas:
+                    frames.append(pd.DataFrame(linhas, columns=cabecalho))
+            if frames:
+                return pd.concat(frames, ignore_index=True)
+            # Sem tabelas — tenta parágrafos tabulados
+            paragrafos = [p.text for p in doc.paragraphs if p.text.strip()]
+            if paragrafos:
+                return pd.DataFrame({"texto": paragrafos})
+            return pd.DataFrame()
+        except Exception as e:
+            raise ValueError(f"Erro ao ler DOCX: {e}")
+
+    # ── HTML disfarçado de xls ──
     amostra = conteudo[:10]
     if amostra.startswith(b"<") or amostra.startswith(b"\xef\xbb\xbf<"):
         for header_row in range(0, 8):
@@ -58,14 +220,15 @@ def ler_excel(arquivo) -> pd.DataFrame:
                         if c and not c.startswith("Unnamed") and c.lower() != "nan"
                     ]
                     if len(colunas_validas) >= 3:
-                        df = df.dropna(how="all").reset_index(drop=True)
-                        return df
+                        return df.dropna(how="all").reset_index(drop=True)
         return pd.DataFrame()
 
+    # ── XLS legado ──
     if nome.endswith(".xls"):
         return pd.read_excel(BytesIO(conteudo), engine="xlrd")
-    else:
-        return pd.read_excel(BytesIO(conteudo), engine="openpyxl")
+
+    # ── XLSX / padrão ──
+    return pd.read_excel(BytesIO(conteudo), engine="openpyxl")
 
 
 def resolver_coluna(df: pd.DataFrame, col_canonica: str) -> str | None:
@@ -100,7 +263,30 @@ def validar_colunas_obrigatorias(df: pd.DataFrame, cols: dict, nome_arquivo: str
 
 
 def normalizar_datas(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    df[col] = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+    """
+    Converte a coluna para datetime detectando o formato automaticamente.
+
+    Problema: pd.to_datetime com dayfirst=True interpreta '2026-06-11' como
+    6 de novembro em vez de 11 de junho, porque trata o segundo segmento como dia.
+
+    Estratégia:
+      1. Tenta formato ISO (YYYY-MM-DD / YYYY-MM-DDTHH:MM:SS) — sem dayfirst.
+      2. Para os valores que ainda ficaram nulos, tenta dayfirst=True
+         (cobre datas no formato brasileiro DD/MM/YYYY).
+    """
+    serie = df[col].astype(str).str.strip()
+
+    # Passo 1: formato ISO — o padrão do XML SpreadsheetML
+    resultado = pd.to_datetime(serie, format="ISO8601", errors="coerce")
+
+    # Passo 2: fallback para formato brasileiro (DD/MM/YYYY ou DD/MM/YYYY HH:MM)
+    mascara_nulos = resultado.isna() & serie.ne("") & serie.ne("nan") & serie.ne("NaT")
+    if mascara_nulos.any():
+        fallback = pd.to_datetime(serie[mascara_nulos], dayfirst=True, errors="coerce")
+        resultado = resultado.copy()
+        resultado[mascara_nulos] = fallback
+
+    df[col] = resultado
     return df
 
 
@@ -176,7 +362,6 @@ def grafico_barras(n_cbill: int, n_oper: int, s_cbill: int, s_oper: int) -> go.F
 aba_config, aba_dash = st.sidebar.tabs(["⚙️ Configurações", "📊 Dashboard"])
 
 with aba_config:
-    # ── Modo de filtro de data ──
     modo_data = st.radio(
         "Modo de filtro de data",
         ["📅 Dia único", "📆 Intervalo de datas"],
@@ -207,14 +392,10 @@ with aba_config:
     for t in TIPOS_EXCLUIDOS_OPER:
         st.markdown(f"🚫 `{t}`")
     st.markdown("---")
-    st.info(
-        "💡 **Padrão de nomes esperado:**\n"
-        "`base_DD.MM_Cbill.xlsx`\n"
-        "`base_DD.MM_oper.xls` _(Comercial)_\n"
-        "`base_gd_DD.MM_oper.xls` _(GD)_"
-    )
+    st.markdown("**Formatos aceitos:**")
+    st.markdown("🔵 **Cbill:** `xlsx`, `xls`")
+    st.markdown("🟠 **Oper:** `xlsx`, `xls`, `xml`, `docx`")
 
-# placeholder para o dashboard (preenchido após processamento)
 dash_placeholder = aba_dash.empty()
 dash_placeholder.info("📂 Faça upload das bases para visualizar o dashboard.")
 
@@ -224,26 +405,43 @@ st.title("🔍 Comparador de Bases — Serviços Divergentes")
 st.markdown("Carregue as bases **Cbill** e **Oper** para identificar serviços divergentes por data limite.")
 
 # ─── upload ───────────────────────────────────────────────────────────────────
+# A origem de cada base é determinada pela caixa de upload, não pelo nome do arquivo.
+
+TIPOS_OPER = ["xlsx", "xls", "xml", "docx"]
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📂 Base Cbill")
-    arquivo_cbill = st.file_uploader("Selecione a base Cbill", type=["xlsx", "xls"], key="cbill")
+    arquivo_cbill = st.file_uploader(
+        "Selecione a base Cbill",
+        type=["xlsx", "xls"],
+        key="cbill",
+    )
 
 with col2:
     st.subheader("📂 Base Oper")
-    arquivo_oper_com = st.file_uploader("Base Oper — Comercial", type=["xlsx", "xls"], key="oper_com")
-    arquivo_oper_gd  = st.file_uploader("Base Oper — GD (opcional)", type=["xlsx", "xls"], key="oper_gd")
+    arquivo_oper_com = st.file_uploader(
+        "Base Oper — Comercial",
+        type=TIPOS_OPER,
+        key="oper_com",
+        help="Aceita: xlsx, xls, xml, docx — identificado automaticamente como Oper",
+    )
+    arquivo_oper_gd = st.file_uploader(
+        "Base Oper — GD (opcional)",
+        type=TIPOS_OPER,
+        key="oper_gd",
+        help="Aceita: xlsx, xls, xml, docx — identificado automaticamente como Oper",
+    )
 
 # ─── processamento ────────────────────────────────────────────────────────────
 
 if arquivo_cbill and arquivo_oper_com:
     try:
         with st.spinner("Carregando bases..."):
-            df_cbill    = ler_excel(arquivo_cbill)
-            df_oper_com = ler_excel(arquivo_oper_com)
-            df_oper_gd  = ler_excel(arquivo_oper_gd) if arquivo_oper_gd else pd.DataFrame()
+            df_cbill    = ler_arquivo(arquivo_cbill)
+            df_oper_com = ler_arquivo(arquivo_oper_com)
+            df_oper_gd  = ler_arquivo(arquivo_oper_gd) if arquivo_oper_gd else pd.DataFrame()
 
         # ── resolve colunas ──
         cols_cbill    = resolver_colunas(df_cbill,    COLUNAS_CBILL)
