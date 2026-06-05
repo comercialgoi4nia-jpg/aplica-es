@@ -5,12 +5,27 @@ import os
 import time
 import tempfile
 import subprocess
-import pyautogui
-import pyperclip
+import requests
+import base64
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+
+# ── Credenciais WhatsApp Cloud API ───────────────────────────────────────────
+# Configure esses valores nos Secrets do Streamlit Cloud:
+# Settings → Secrets → adicione as linhas abaixo
+#
+# WHATSAPP_TOKEN = "seu_token_aqui"
+# PHONE_NUMBER_ID = "seu_phone_number_id_aqui"
+# RECIPIENT_NUMBER = "5562999999999"  # seu número com DDI+DDD
+
+WA_TOKEN      = st.secrets.get("WHATSAPP_TOKEN", "")
+WA_PHONE_ID   = st.secrets.get("PHONE_NUMBER_ID", "")
+WA_RECIPIENT  = st.secrets.get("RECIPIENT_NUMBER", "")
+
+
+# ── Gerar Excel ───────────────────────────────────────────────────────────────
 
 def gerar_excel(tabela: pd.DataFrame) -> bytes:
     wb = Workbook()
@@ -98,41 +113,66 @@ def gerar_excel(tabela: pd.DataFrame) -> bytes:
     return buf.read()
 
 
-def enviar_whatsapp_grupo(nome_grupo: str, caminho_arquivo: str) -> bool:
-    try:
-        subprocess.Popen("whatsapp:", shell=True)
-        time.sleep(4)
+# ── WhatsApp Cloud API ────────────────────────────────────────────────────────
 
-        pyautogui.hotkey("ctrl", "f")
-        time.sleep(1)
+def upload_midia_whatsapp(excel_bytes: bytes) -> str | None:
+    """Faz upload do Excel para a API da Meta e retorna o media_id."""
+    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/media"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
+    files = {
+        "file": ("relatorio_p1.xlsx", excel_bytes,
+                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "type": (None, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "messaging_product": (None, "whatsapp"),
+    }
+    resp = requests.post(url, headers=headers, files=files)
+    if resp.status_code == 200:
+        return resp.json().get("id")
+    else:
+        st.error(f"Erro no upload da mídia: {resp.status_code} — {resp.text}")
+        return None
 
-        pyperclip.copy(nome_grupo)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(2)
 
-        pyautogui.press("enter")
-        time.sleep(1)
-
-        pyautogui.press("escape")
-        time.sleep(0.5)
-
-        pyautogui.hotkey("ctrl", "shift", "a")
-        time.sleep(2)
-
-        pyperclip.copy(caminho_arquivo)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.5)
-        pyautogui.press("enter")
-        time.sleep(2)
-
-        pyautogui.press("enter")
-        time.sleep(1)
-
+def enviar_documento_whatsapp(media_id: str, caption: str = "") -> bool:
+    """Envia o documento já carregado para o número destinatário."""
+    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": WA_RECIPIENT,
+        "type": "document",
+        "document": {
+            "id": media_id,
+            "filename": "relatorio_suspensao_p1.xlsx",
+            "caption": caption,
+        },
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    if resp.status_code == 200:
         return True
-
-    except Exception as e:
-        st.error(f"Erro na automação: {e}")
+    else:
+        st.error(f"Erro ao enviar mensagem: {resp.status_code} — {resp.text}")
         return False
+
+
+def enviar_whatsapp(excel_bytes: bytes) -> bool:
+    if not WA_TOKEN or not WA_PHONE_ID or not WA_RECIPIENT:
+        st.error("⚠️ Credenciais do WhatsApp não configuradas nos Secrets do Streamlit.")
+        return False
+
+    with st.spinner("📤 Fazendo upload do arquivo..."):
+        media_id = upload_midia_whatsapp(excel_bytes)
+
+    if not media_id:
+        return False
+
+    caption = "📋 *Relatório Acompanhamento Suspensão/Vistoria P1*\nGerado automaticamente."
+
+    with st.spinner("💬 Enviando pelo WhatsApp..."):
+        return enviar_documento_whatsapp(media_id, caption)
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -146,13 +186,6 @@ SUBTIPOS_P1 = [
     "P1 SUSPENSÃO - GRUPO A",
     "P1 SUSPENSÃO - POSTE",
     "P1 VISTORIA - RETIRADA DE RAMAL",
-]
-
-GRUPOS_FIXOS = [
-    "Liderança Comercial Gyn",
-    "ELCOP - COMERCIAL / CORTE E RELIGA",
-    "COMERCIAL STC",
-    "Outro",
 ]
 
 if uploaded_file:
@@ -215,7 +248,7 @@ if uploaded_file:
 
         st.divider()
 
-        # Cabeçalho da tabela + botões
+        # Cabeçalho + botões
         col_titulo, col_excel, col_whats = st.columns([3, 1, 1])
         col_titulo.subheader("Detalhamento por Dia")
 
@@ -235,50 +268,17 @@ if uploaded_file:
 
         # Painel de envio
         if st.session_state.get("mostrar_envio_zap"):
-            with st.expander("📤 Enviar relatório para grupo do WhatsApp", expanded=True):
-
-                grupo_selecionado = st.selectbox(
-                    "Selecione o grupo",
-                    options=GRUPOS_FIXOS,
-                    key="grupo_select_zap"
-                )
-
-                if grupo_selecionado == "Outro":
-                    nome_grupo = st.text_input(
-                        "Digite o nome exato do grupo",
-                        placeholder="Ex: Meu Grupo Operacional",
-                        key="nome_grupo_zap"
-                    )
-                else:
-                    nome_grupo = grupo_selecionado
-                    st.caption(f"📌 Grupo selecionado: **{nome_grupo}**")
+            with st.expander("📤 Enviar relatório pelo WhatsApp", expanded=True):
+                st.info(f"📱 O relatório será enviado para o número configurado nos Secrets.")
 
                 col_a, col_b = st.columns([1, 1])
 
                 with col_a:
                     if st.button("✅ Confirmar envio", use_container_width=True):
-                        if not nome_grupo.strip():
-                            st.warning("Digite o nome do grupo antes de enviar.")
-                        else:
-                            with tempfile.NamedTemporaryFile(
-                                delete=False,
-                                suffix=".xlsx",
-                                prefix="relatorio_p1_"
-                            ) as tmp:
-                                tmp.write(excel_bytes)
-                                tmp_path = tmp.name
-
-                            st.info("⏳ Abrindo WhatsApp Desktop... não mexa no mouse por ~10 segundos.")
-                            sucesso = enviar_whatsapp_grupo(nome_grupo.strip(), tmp_path)
-
-                            try:
-                                os.remove(tmp_path)
-                            except Exception:
-                                pass
-
-                            if sucesso:
-                                st.success("✅ Relatório enviado com sucesso!")
-                                st.session_state["mostrar_envio_zap"] = False
+                        sucesso = enviar_whatsapp(excel_bytes)
+                        if sucesso:
+                            st.success("✅ Relatório enviado com sucesso!")
+                            st.session_state["mostrar_envio_zap"] = False
 
                 with col_b:
                     if st.button("❌ Cancelar", use_container_width=True):
