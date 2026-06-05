@@ -1,28 +1,21 @@
 import streamlit as st
 import pandas as pd
 import io
-import os
-import time
-import tempfile
-import subprocess
 import requests
-import base64
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib import font_manager
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 
 # ── Credenciais WhatsApp Cloud API ───────────────────────────────────────────
-# Configure esses valores nos Secrets do Streamlit Cloud:
-# Settings → Secrets → adicione as linhas abaixo
-#
-# WHATSAPP_TOKEN = "seu_token_aqui"
-# PHONE_NUMBER_ID = "seu_phone_number_id_aqui"
-# RECIPIENT_NUMBER = "5562999999999"  # seu número com DDI+DDD
-
-WA_TOKEN      = st.secrets.get("WHATSAPP_TOKEN", "")
-WA_PHONE_ID   = st.secrets.get("PHONE_NUMBER_ID", "")
-WA_RECIPIENT  = st.secrets.get("RECIPIENT_NUMBER", "")
+WA_TOKEN     = st.secrets.get("WHATSAPP_TOKEN", "")
+WA_PHONE_ID  = st.secrets.get("PHONE_NUMBER_ID", "")
+WA_RECIPIENT = st.secrets.get("RECIPIENT_NUMBER", "")
 
 
 # ── Gerar Excel ───────────────────────────────────────────────────────────────
@@ -113,28 +106,161 @@ def gerar_excel(tabela: pd.DataFrame) -> bytes:
     return buf.read()
 
 
+# ── Gerar Imagem da Tabela ────────────────────────────────────────────────────
+
+def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
+    meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
+             "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
+
+    # Formatar dados para exibição
+    linhas = []
+    for row in tabela.itertuples(index=False):
+        data_str = row[0].strftime("%d/%b")
+        for en, pt in meses.items():
+            data_str = data_str.replace(en, pt)
+        divida_fmt = f"R$ {float(row[5]):,.2f}".replace(",","X").replace(".",",").replace("X",".")
+        linhas.append([
+            data_str,
+            str(int(row[1])),
+            str(int(row[2])),
+            str(int(row[3])),
+            str(int(row[4])),
+            divida_fmt,
+        ])
+
+    # Linha de total
+    t1 = int(tabela.iloc[:,1].sum())
+    t2 = int(tabela.iloc[:,2].sum())
+    t3 = int(tabela.iloc[:,3].sum())
+    t4 = int(tabela.iloc[:,4].sum())
+    t5 = divida_dia.sum()
+    t5_fmt = f"R$ {t5:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+    linhas.append(["TOTAL GERAL", str(t1), str(t2), str(t3), str(t4), t5_fmt])
+
+    headers = ["DATA", "P1 SUSPENSÃO\nGRUPO A", "P1 SUSPENSÃO\nPOSTE",
+               "P1 VISTORIA\nRET. RAMAL", "TOTAL\nGERAL", "TOTAL DÍVIDA"]
+
+    n_rows = len(linhas)
+    n_cols = len(headers)
+
+    # Cores
+    COR_TITULO  = "#1F4E79"
+    COR_HEADER  = "#2E5F9E"
+    COR_LISTA   = "#DEEAF1"
+    COR_BRANCO  = "#FFFFFF"
+    COR_TOTAL   = "#2E5F9E"
+    COR_TEXTO   = "#1a1a2e"
+    COR_TXBCO   = "#FFFFFF"
+
+    # Tamanho da figura
+    fig_w = 16
+    row_h = 0.55
+    header_h = 0.75
+    title_h = 0.65
+    fig_h = title_h + header_h + n_rows * row_h + 0.3
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig.patch.set_facecolor(COR_BRANCO)
+    ax.set_facecolor(COR_BRANCO)
+    ax.axis("off")
+
+    total_h = fig_h
+    y_cursor = total_h  # de cima pra baixo
+
+    # Título
+    y_cursor -= title_h
+    title_rect = mpatches.FancyBboxPatch(
+        (0, y_cursor), fig_w, title_h,
+        boxstyle="square,pad=0",
+        linewidth=0, facecolor=COR_TITULO,
+        transform=ax.transData, clip_on=False
+    )
+    ax.add_patch(title_rect)
+    ax.text(fig_w / 2, y_cursor + title_h / 2,
+            "Acompanhamento de Suspensão / Vistoria P1",
+            ha="center", va="center",
+            fontsize=13, fontweight="bold", color=COR_TXBCO,
+            transform=ax.transData)
+
+    # Cabeçalho
+    y_cursor -= header_h
+    col_widths = [1.6, 2.8, 2.4, 2.8, 1.6, 2.4]  # proporções
+    total_w = sum(col_widths)
+    scale = fig_w / total_w
+    col_widths_px = [w * scale for w in col_widths]
+
+    x = 0
+    for j, (h, cw) in enumerate(zip(headers, col_widths_px)):
+        rect = mpatches.FancyBboxPatch(
+            (x, y_cursor), cw, header_h,
+            boxstyle="square,pad=0",
+            linewidth=0, facecolor=COR_HEADER,
+            transform=ax.transData, clip_on=False
+        )
+        ax.add_patch(rect)
+        ax.text(x + cw / 2, y_cursor + header_h / 2, h,
+                ha="center", va="center",
+                fontsize=8.5, fontweight="bold", color=COR_TXBCO,
+                linespacing=1.3, transform=ax.transData)
+        x += cw
+
+    # Linhas de dados
+    for i, linha in enumerate(linhas):
+        y_cursor -= row_h
+        is_total = (i == len(linhas) - 1)
+        cor_fundo = COR_TOTAL if is_total else (COR_LISTA if i % 2 == 0 else COR_BRANCO)
+        cor_txt   = COR_TXBCO if is_total else COR_TEXTO
+        peso      = "bold" if is_total else "normal"
+
+        x = 0
+        for j, (val, cw) in enumerate(zip(linha, col_widths_px)):
+            rect = mpatches.FancyBboxPatch(
+                (x, y_cursor), cw, row_h,
+                boxstyle="square,pad=0",
+                linewidth=0, facecolor=cor_fundo,
+                transform=ax.transData, clip_on=False
+            )
+            ax.add_patch(rect)
+
+            align = "right" if j == n_cols - 1 else "center"
+            x_txt = (x + cw - 0.15) if align == "right" else (x + cw / 2)
+            ax.text(x_txt, y_cursor + row_h / 2, val,
+                    ha=align, va="center",
+                    fontsize=9, fontweight=peso, color=cor_txt,
+                    transform=ax.transData)
+            x += cw
+
+    ax.set_xlim(0, fig_w)
+    ax.set_ylim(0, total_h)
+
+    plt.tight_layout(pad=0)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=COR_BRANCO)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
 # ── WhatsApp Cloud API ────────────────────────────────────────────────────────
 
-def upload_midia_whatsapp(excel_bytes: bytes) -> str | None:
-    """Faz upload do Excel para a API da Meta e retorna o media_id."""
+def upload_midia_whatsapp(img_bytes: bytes) -> str | None:
     url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/media"
     headers = {"Authorization": f"Bearer {WA_TOKEN}"}
     files = {
-        "file": ("relatorio_p1.xlsx", excel_bytes,
-                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-        "type": (None, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "file": ("relatorio_p1.png", img_bytes, "image/png"),
+        "type": (None, "image/png"),
         "messaging_product": (None, "whatsapp"),
     }
     resp = requests.post(url, headers=headers, files=files)
     if resp.status_code == 200:
         return resp.json().get("id")
-    else:
-        st.error(f"Erro no upload da mídia: {resp.status_code} — {resp.text}")
-        return None
+    st.error(f"Erro no upload da mídia: {resp.status_code} — {resp.text}")
+    return None
 
 
-def enviar_documento_whatsapp(media_id: str, caption: str = "") -> bool:
-    """Envia o documento já carregado para o número destinatário."""
+def enviar_imagem_whatsapp(media_id: str) -> bool:
     url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WA_TOKEN}",
@@ -143,36 +269,29 @@ def enviar_documento_whatsapp(media_id: str, caption: str = "") -> bool:
     payload = {
         "messaging_product": "whatsapp",
         "to": WA_RECIPIENT,
-        "type": "document",
-        "document": {
+        "type": "image",
+        "image": {
             "id": media_id,
-            "filename": "relatorio_suspensao_p1.xlsx",
-            "caption": caption,
+            "caption": "📋 *Acompanhamento Suspensão/Vistoria P1*\nRelatório gerado automaticamente.",
         },
     }
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code == 200:
         return True
-    else:
-        st.error(f"Erro ao enviar mensagem: {resp.status_code} — {resp.text}")
-        return False
+    st.error(f"Erro ao enviar imagem: {resp.status_code} — {resp.text}")
+    return False
 
 
-def enviar_whatsapp(excel_bytes: bytes) -> bool:
+def enviar_whatsapp(img_bytes: bytes) -> bool:
     if not WA_TOKEN or not WA_PHONE_ID or not WA_RECIPIENT:
         st.error("⚠️ Credenciais do WhatsApp não configuradas nos Secrets do Streamlit.")
         return False
-
-    with st.spinner("📤 Fazendo upload do arquivo..."):
-        media_id = upload_midia_whatsapp(excel_bytes)
-
+    with st.spinner("📤 Fazendo upload da imagem..."):
+        media_id = upload_midia_whatsapp(img_bytes)
     if not media_id:
         return False
-
-    caption = "📋 *Relatório Acompanhamento Suspensão/Vistoria P1*\nGerado automaticamente."
-
     with st.spinner("💬 Enviando pelo WhatsApp..."):
-        return enviar_documento_whatsapp(media_id, caption)
+        return enviar_imagem_whatsapp(media_id)
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -248,11 +367,18 @@ if uploaded_file:
 
         st.divider()
 
-        # Cabeçalho + botões
-        col_titulo, col_excel, col_whats = st.columns([3, 1, 1])
-        col_titulo.subheader("Detalhamento por Dia")
-
+        # Gera imagem e excel
         excel_bytes = gerar_excel(tabela)
+        img_bytes   = gerar_imagem_tabela(tabela, divida_dia)
+
+        # Preview da imagem
+        st.subheader("Detalhamento por Dia")
+        st.image(img_bytes, use_container_width=True)
+
+        st.divider()
+
+        # Botões
+        col_excel, col_whats = st.columns([1, 1])
 
         col_excel.download_button(
             label="⬇️ Baixar Excel",
@@ -263,28 +389,27 @@ if uploaded_file:
         )
 
         with col_whats:
-            if st.button("💬 Enviar pelo WhatsApp", use_container_width=True):
+            if st.button("💬 Enviar imagem pelo WhatsApp", use_container_width=True):
                 st.session_state["mostrar_envio_zap"] = True
 
         # Painel de envio
         if st.session_state.get("mostrar_envio_zap"):
-            with st.expander("📤 Enviar relatório pelo WhatsApp", expanded=True):
-                st.info(f"📱 O relatório será enviado para o número configurado nos Secrets.")
+            with st.expander("📤 Confirmar envio pelo WhatsApp", expanded=True):
+                st.info("📱 A imagem da tabela será enviada para o número configurado nos Secrets.")
 
-                col_a, col_b = st.columns([1, 1])
-
+                col_a, col_b = st.columns(2)
                 with col_a:
                     if st.button("✅ Confirmar envio", use_container_width=True):
-                        sucesso = enviar_whatsapp(excel_bytes)
+                        sucesso = enviar_whatsapp(img_bytes)
                         if sucesso:
-                            st.success("✅ Relatório enviado com sucesso!")
+                            st.success("✅ Imagem enviada com sucesso!")
                             st.session_state["mostrar_envio_zap"] = False
-
                 with col_b:
                     if st.button("❌ Cancelar", use_container_width=True):
                         st.session_state["mostrar_envio_zap"] = False
                         st.rerun()
 
+        # Tabela numérica abaixo
         st.dataframe(
             tabela_exibir,
             use_container_width=True,
