@@ -6,7 +6,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib import font_manager
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -112,7 +111,6 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
     meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
              "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
 
-    # Formatar dados para exibição
     linhas = []
     for row in tabela.itertuples(index=False):
         data_str = row[0].strftime("%d/%b")
@@ -128,7 +126,6 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
             divida_fmt,
         ])
 
-    # Linha de total
     t1 = int(tabela.iloc[:,1].sum())
     t2 = int(tabela.iloc[:,2].sum())
     t3 = int(tabela.iloc[:,3].sum())
@@ -143,7 +140,6 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
     n_rows = len(linhas)
     n_cols = len(headers)
 
-    # Cores
     COR_TITULO  = "#1F4E79"
     COR_HEADER  = "#2E5F9E"
     COR_LISTA   = "#DEEAF1"
@@ -152,7 +148,6 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
     COR_TEXTO   = "#1a1a2e"
     COR_TXBCO   = "#FFFFFF"
 
-    # Tamanho da figura
     fig_w = 16
     row_h = 0.55
     header_h = 0.75
@@ -165,7 +160,7 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
     ax.axis("off")
 
     total_h = fig_h
-    y_cursor = total_h  # de cima pra baixo
+    y_cursor = total_h
 
     # Título
     y_cursor -= title_h
@@ -184,7 +179,7 @@ def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
 
     # Cabeçalho
     y_cursor -= header_h
-    col_widths = [1.6, 2.8, 2.4, 2.8, 1.6, 2.4]  # proporções
+    col_widths = [1.6, 2.8, 2.4, 2.8, 1.6, 2.4]
     total_w = sum(col_widths)
     scale = fig_w / total_w
     col_widths_px = [w * scale for w in col_widths]
@@ -260,7 +255,7 @@ def upload_midia_whatsapp(img_bytes: bytes) -> str | None:
     return None
 
 
-def enviar_imagem_whatsapp(media_id: str) -> bool:
+def enviar_imagem_whatsapp(media_id: str, numero: str) -> bool:
     url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WA_TOKEN}",
@@ -282,7 +277,6 @@ def enviar_imagem_whatsapp(media_id: str) -> bool:
     return False
 
 
-# Para:
 def enviar_whatsapp(img_bytes: bytes, numero: str) -> bool:
     if not WA_TOKEN or not WA_PHONE_ID:
         st.error("⚠️ Credenciais do WhatsApp não configuradas nos Secrets do Streamlit.")
@@ -293,6 +287,8 @@ def enviar_whatsapp(img_bytes: bytes, numero: str) -> bool:
         return False
     with st.spinner("💬 Enviando pelo WhatsApp..."):
         return enviar_imagem_whatsapp(media_id, numero)
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Acompanhamento Suspensão/Vistoria P1", layout="wide")
@@ -394,29 +390,29 @@ if uploaded_file:
         # Painel de envio
         if st.session_state.get("mostrar_envio_zap"):
             with st.expander("📤 Confirmar envio pelo WhatsApp", expanded=True):
-    numero = st.text_input(
-        "📱 Número do destinatário",
-        placeholder="Ex: 5562999999999  (DDI + DDD + número, sem espaços)",
-        key="numero_destinatario"
-    )
-    st.caption("🇧🇷 Brasil: comece com 55 — ex: **5562999887766**")
+                numero = st.text_input(
+                    "📱 Número do destinatário",
+                    placeholder="Ex: 5562999999999  (DDI + DDD + número, sem espaços)",
+                    key="numero_destinatario"
+                )
+                st.caption("🇧🇷 Brasil: comece com 55 — ex: **5562999887766**")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("✅ Confirmar envio", use_container_width=True):
-            if not numero.strip():
-                st.warning("Digite o número antes de enviar.")
-            elif not numero.strip().isdigit() or len(numero.strip()) < 12:
-                st.warning("Número inválido. Use apenas dígitos com DDI+DDD, ex: 5562999887766")
-            else:
-                sucesso = enviar_whatsapp(img_bytes, numero.strip())
-                if sucesso:
-                    st.success("✅ Imagem enviada com sucesso!")
-                    st.session_state["mostrar_envio_zap"] = False
-    with col_b:
-        if st.button("❌ Cancelar", use_container_width=True):
-            st.session_state["mostrar_envio_zap"] = False
-            st.rerun()
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button("✅ Confirmar envio", use_container_width=True):
+                        if not numero.strip():
+                            st.warning("Digite o número antes de enviar.")
+                        elif not numero.strip().isdigit() or len(numero.strip()) < 12:
+                            st.warning("Número inválido. Use apenas dígitos com DDI+DDD, ex: 5562999887766")
+                        else:
+                            sucesso = enviar_whatsapp(img_bytes, numero.strip())
+                            if sucesso:
+                                st.success("✅ Imagem enviada com sucesso!")
+                                st.session_state["mostrar_envio_zap"] = False
+                with col_b:
+                    if st.button("❌ Cancelar", use_container_width=True):
+                        st.session_state["mostrar_envio_zap"] = False
+                        st.rerun()
 
         # Tabela numérica abaixo
         st.dataframe(
