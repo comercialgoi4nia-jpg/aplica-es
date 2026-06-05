@@ -268,7 +268,7 @@ def enviar_imagem_whatsapp(media_id: str) -> bool:
     }
     payload = {
         "messaging_product": "whatsapp",
-        "to": WA_RECIPIENT,
+        "to": numero,
         "type": "image",
         "image": {
             "id": media_id,
@@ -282,8 +282,9 @@ def enviar_imagem_whatsapp(media_id: str) -> bool:
     return False
 
 
-def enviar_whatsapp(img_bytes: bytes) -> bool:
-    if not WA_TOKEN or not WA_PHONE_ID or not WA_RECIPIENT:
+# Para:
+def enviar_whatsapp(img_bytes: bytes, numero: str) -> bool:
+    if not WA_TOKEN or not WA_PHONE_ID:
         st.error("⚠️ Credenciais do WhatsApp não configuradas nos Secrets do Streamlit.")
         return False
     with st.spinner("📤 Fazendo upload da imagem..."):
@@ -291,9 +292,7 @@ def enviar_whatsapp(img_bytes: bytes) -> bool:
     if not media_id:
         return False
     with st.spinner("💬 Enviando pelo WhatsApp..."):
-        return enviar_imagem_whatsapp(media_id)
-
-
+        return enviar_imagem_whatsapp(media_id, numero)
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Acompanhamento Suspensão/Vistoria P1", layout="wide")
@@ -395,19 +394,29 @@ if uploaded_file:
         # Painel de envio
         if st.session_state.get("mostrar_envio_zap"):
             with st.expander("📤 Confirmar envio pelo WhatsApp", expanded=True):
-                st.info("📱 A imagem da tabela será enviada para o número configurado nos Secrets.")
+    numero = st.text_input(
+        "📱 Número do destinatário",
+        placeholder="Ex: 5562999999999  (DDI + DDD + número, sem espaços)",
+        key="numero_destinatario"
+    )
+    st.caption("🇧🇷 Brasil: comece com 55 — ex: **5562999887766**")
 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if st.button("✅ Confirmar envio", use_container_width=True):
-                        sucesso = enviar_whatsapp(img_bytes)
-                        if sucesso:
-                            st.success("✅ Imagem enviada com sucesso!")
-                            st.session_state["mostrar_envio_zap"] = False
-                with col_b:
-                    if st.button("❌ Cancelar", use_container_width=True):
-                        st.session_state["mostrar_envio_zap"] = False
-                        st.rerun()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("✅ Confirmar envio", use_container_width=True):
+            if not numero.strip():
+                st.warning("Digite o número antes de enviar.")
+            elif not numero.strip().isdigit() or len(numero.strip()) < 12:
+                st.warning("Número inválido. Use apenas dígitos com DDI+DDD, ex: 5562999887766")
+            else:
+                sucesso = enviar_whatsapp(img_bytes, numero.strip())
+                if sucesso:
+                    st.success("✅ Imagem enviada com sucesso!")
+                    st.session_state["mostrar_envio_zap"] = False
+    with col_b:
+        if st.button("❌ Cancelar", use_container_width=True):
+            st.session_state["mostrar_envio_zap"] = False
+            st.rerun()
 
         # Tabela numérica abaixo
         st.dataframe(
