@@ -68,30 +68,23 @@ def gerar_excel(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-# ─── Google Sheets ────────────────────────────────────────────────────────────
+# ─── Google Sheets Configuration ──────────────────────────────────────────────
 
 def get_gsheet_client():
-    # 1. Tenta pegar primeiro do session_state (configuração manual)
     creds_dict = st.session_state.get("gsheet_creds")
-    
-    # 2. Se não estiver no session_state, tenta carregar do secrets.toml
     if not creds_dict:
         try:
-            # Em vez de dict(), usamos .to_dict() que é o método nativo do Streamlit para isso
             creds_dict = st.secrets["gcp_service_account"].to_dict()
-        except Exception as e:
-            # Se deu erro ao ler o secrets, desiga silenciosamente (ou mude para st.error(e) para debugar)
+        except Exception:
             return None
             
     try:
-        # Garante que os caracteres de quebra de linha da chave privada sejam interpretados corretamente
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
         return gspread.authorize(creds)
     except Exception as e:
-        # Exibe o erro real caso a chave esteja mal formatada dentro do arquivo
         st.sidebar.error(f"Erro nas credenciais: {e}")
         return None
 
@@ -103,7 +96,7 @@ def get_spreadsheet_id():
             sid = st.secrets["spreadsheet_id"]
         except Exception:
             pass
-    return sid
+    return str(sid).strip()
 
 
 def get_or_create_sheet(client, spreadsheet_id, sheet_name):
@@ -267,7 +260,7 @@ def filtrar_e_formatar(df: pd.DataFrame) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-# ─── Google Sheets: salvar turno ─────────────────────────────────────────────
+# ─── Google Sheets: Operações Otimizadas Antiduplicidade ─────────────────────
 
 HEADERS_TURNOS = ["Data", "Prefixo", "Início de Turno", "Previsão de Saída", "Intervalo",
                   "Fim de Intervalo", "Motivo", "Ocorrência", "Turno Aberto"]
@@ -282,9 +275,11 @@ def salvar_turnos_gs(client, spreadsheet_id, df_dia):
     ensure_headers(ws, HEADERS_TURNOS)
     df_atual = load_sheet_df(ws)
     hoje = date.today().strftime("%Y-%m-%d")
-    # remove registros do dia atual para reescrever
+    
+    # Remove registros do dia atual na memória antes de ressalvar para evitar duplicar na aba Turnos
     if not df_atual.empty and "Data" in df_atual.columns:
         df_atual = df_atual[df_atual["Data"].astype(str) != hoje]
+        
     novos = []
     for _, row in df_dia.iterrows():
         novos.append({
@@ -298,28 +293,52 @@ def salvar_turnos_gs(client, spreadsheet_id, df_dia):
             "Ocorrência": "",
             "Turno Aberto": row["Turno Aberto"],
         })
+    
     df_final = pd.concat([df_atual, pd.DataFrame(novos)], ignore_index=True)
     ws.clear()
-    ws.append_row(HEADERS_TURNOS)
+    
+    dados_para_enviar = [HEADERS_TURNOS]
     for _, r in df_final.iterrows():
-        ws.append_row([str(r.get(h, "")) for h in HEADERS_TURNOS])
+        dados_para_enviar.append([str(r.get(h, "")) for h in HEADERS_TURNOS])
+    
+    ws.append_rows(dados_para_enviar) 
     return True
 
 
 def atualizar_historico(client, spreadsheet_id, df_dia):
-    ws = get_or_create_sheet(client, spreadsheet_id, "Histórico")
-    if ws is None:
+    ws_turnos = get_or_create_sheet(client, spreadsheet_id, "Turnos")
+    ws_hist = get_or_create_sheet(client, spreadsheet_id, "Histórico")
+    if ws_turnos is None or ws_hist is None:
         return False
-    ensure_headers(ws, HEADERS_HISTORICO)
-    df_hist = load_sheet_df(ws)
+        
+    ensure_headers(ws_hist, HEADERS_HISTORICO)
+    df_turnos_existentes = load_sheet_df(ws_turnos)
+    df_hist = load_sheet_df(ws_hist)
+    
     hoje = date.today()
     mes_atual = hoje.strftime("%Y-%m")
     semana_atual = hoje.strftime("%Y-W%W")
+    hoje_str = hoje.strftime("%Y-%m-%d")
 
     for _, row in df_dia.iterrows():
         prefixo = row["Prefixo"]
         abriu = row["Turno Aberto"] == "✅ Sim"
         tem_intervalo = bool(row["Intervalo"])
+
+        # 🔥 PREVENÇÃO DE DUPLICIDADE COORDENADA:
+        # Verifica se essa combinação de Prefixo e Data JÁ EXISTIA de fato na planilha física antes deste upload
+        ja_existia_hoje = False
+        if not df_turnos_existentes.empty and "Data" in df_turnos_existentes.columns:
+            match = df_turnos_existentes[
+                (df_turnos_existentes["Data"].astype(str) == hoje_str) & 
+                (df_turnos_existentes["Prefixo"].astype(str) == prefixo)
+            ]
+            if not match.empty:
+                ja_existia_hoje = True
+
+        # Se já existia, pula o incremento para não adulterar o histórico de forma cumulativa
+        if ja_existia_hoje:
+            continue
 
         mask_mes = (df_hist.get("Mês", pd.Series()) == mes_atual) & \
                    (df_hist.get("Prefixo", pd.Series()) == prefixo) & \
@@ -342,14 +361,16 @@ def atualizar_historico(client, spreadsheet_id, df_dia):
                 df_hist.at[idx, "Intervalos na Semana"] = int(df_hist.at[idx, "Intervalos na Semana"] or 0) + 1
                 df_hist.at[idx, "Intervalos no Mês"] = int(df_hist.at[idx, "Intervalos no Mês"] or 0) + 1
 
-    ws.clear()
-    ws.append_row(HEADERS_HISTORICO)
+    ws_hist.clear()
+    dados_historico = [HEADERS_HISTORICO]
     for _, r in df_hist.iterrows():
-        ws.append_row([str(r.get(h, "")) for h in HEADERS_HISTORICO])
+        dados_historico.append([str(r.get(h, "")) for h in HEADERS_HISTORICO])
+        
+    ws_hist.append_rows(dados_historico)
     return True
 
 
-# ─── Páginas ──────────────────────────────────────────────────────────────────
+# ─── Páginas do Sistema ───────────────────────────────────────────────────────
 
 def pagina_upload():
     st.title("📋 Controle de Turnos do Dia")
@@ -373,7 +394,6 @@ def pagina_upload():
 
     df = st.session_state["df_dia"]
 
-    # Métricas
     total = len(df)
     abertos = (df["Turno Aberto"] == "✅ Sim").sum()
     fechados = total - abertos
@@ -402,7 +422,6 @@ def pagina_upload():
     st.markdown("---")
     col_gs, col_xlsx, col_csv = st.columns([2, 1, 1])
 
-    # ── Google Sheets ──
     client = get_gsheet_client()
     sid = get_spreadsheet_id()
     with col_gs:
@@ -410,10 +429,11 @@ def pagina_upload():
             if st.button("☁️ Salvar no Google Sheets", type="primary", use_container_width=True):
                 with st.spinner("Salvando..."):
                     try:
-                        ok1 = salvar_turnos_gs(client, sid, df)
+                        # Primeiro verifica o histórico baseando-se no estado atual da planilha, depois salva os novos dados
                         ok2 = atualizar_historico(client, sid, df)
+                        ok1 = salvar_turnos_gs(client, sid, df)
                         if ok1 and ok2:
-                            st.success("✅ Dados salvos no Google Sheets!")
+                            st.success("✅ Dados processados e salvos sem duplicidades no histórico!")
                         else:
                             st.error("Erro ao salvar.")
                     except Exception as e:
@@ -421,7 +441,6 @@ def pagina_upload():
         else:
             st.warning("⚙️ Configure o Google Sheets na aba **Configurações**.")
 
-    # ── Download Excel ──
     with col_xlsx:
         xlsx_bytes = gerar_excel(df)
         st.download_button(
@@ -432,25 +451,21 @@ def pagina_upload():
             use_container_width=True,
         )
 
-    # ── Download CSV ──
     with col_csv:
         csv = df.to_csv(index=False).encode("utf-8-sig")
         st.download_button("📄 Baixar CSV", csv, f"turnos_{date.today()}.csv", "text/csv", use_container_width=True)
 
 
 def pagina_edicao():
-    st.title("✏️ Editar Registros de Turno")
+    st.title("✏️ Gerenciamento de Intervalos e Edição")
 
-    if not (st.session_state.get("gsheet_creds") and st.session_state.get("spreadsheet_id")):
+    client = get_gsheet_client()
+    sid = get_spreadsheet_id()
+    
+    if not (client and sid):
         st.warning("Configure o Google Sheets na aba **Configurações**.")
         return
 
-    client = get_gsheet_client()
-    if client is None:
-        st.error("Não foi possível conectar ao Google Sheets.")
-        return
-
-    sid = st.session_state["spreadsheet_id"]
     ws = get_or_create_sheet(client, sid, "Turnos")
     if ws is None:
         return
@@ -460,73 +475,150 @@ def pagina_edicao():
         st.info("Nenhum dado encontrado na planilha.")
         return
 
-    # Filtros
+    # Divisão em duas abas operacionais
+    tab_fechar, tab_atribuir = st.tabs(["🕐 Finalizar Intervalos Pendentes", "➕ Atribuir Início de Intervalo"])
+
+    # ─── ABA 1: FINALIZAR INTERVALOS ABERTOS PENDENTES ───
+    with tab_fechar:
+        # Regra: Tem que possuir Intervalo registrado, mas Fim de Intervalo precisa estar vazio
+        mask_pendentes = (df["Intervalo"].astype(str).str.strip() != "") & \
+                         (df["Fim de Intervalo"].astype(str).str.strip() == "")
+                         
+        df_pendentes = df[mask_pendentes].copy()
+
+        if df_pendentes.empty:
+            st.success("🎉 Excelente! Nenhuma equipe possui intervalo pendente de fechamento neste momento.")
+        else:
+            st.warning(f"⚠️ Há {len(df_pendentes)} equipe(s) com o intervalo em andamento (Sem horário de fim).")
+            
+            idx_sel = st.selectbox(
+                "Selecione a equipe que terminou o intervalo para atualizar:",
+                df_pendentes.index,
+                format_func=lambda i: f"Data: {df_pendentes.at[i,'Data']} | Equipe: {df_pendentes.at[i,'Prefixo']} (Início do Intervalo às: {df_pendentes.at[i,'Intervalo']})",
+                key="sb_pendentes"
+            )
+            
+            row = df.loc[idx_sel]
+            
+            with st.form("form_fechar_intervalo"):
+                st.markdown(f"### Atualizando: **{row['Prefixo']}**")
+                c1, c2 = st.columns(2)
+                fim_intervalo = c1.text_input("🕐 Definir Fim de Intervalo (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
+                motivo = c2.text_input("📌 Motivo", value=str(row.get("Motivo", "")))
+                ocorrencia = st.text_area("📋 Ocorrência", value=str(row.get("Ocorrência", "")), height=80)
+
+                submitted_fim = st.form_submit_button("💾 Confirmar Fim de Intervalo", type="primary")
+
+            if submitted_fim:
+                df.at[idx_sel, "Fim de Intervalo"] = fim_intervalo
+                df.at[idx_sel, "Motivo"] = motivo
+                df.at[idx_sel, "Ocorrência"] = ocorrencia
+                try:
+                    ws.clear()
+                    dados_edicao = [HEADERS_TURNOS]
+                    for _, r in df.iterrows():
+                        dados_edicao.append([str(r.get(h, "")) for h in HEADERS_TURNOS])
+                    ws.append_rows(dados_edicao)
+                    st.success("✅ Fim de intervalo registrado com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
+
+    # ─── ABA 2: ATRIBUIR NOVO INTERVALO MANUALMENTE ───
+    with tab_atribuir:
+        st.markdown("Utilize esta seção caso uma equipe tenha saído de intervalo mas o horário não veio registrado automaticamente.")
+        
+        # Filtra equipes cadastradas que ainda não possuem NENHUM intervalo registrado hoje
+        mask_sem_intervalo = (df["Intervalo"].astype(str).str.strip() == "")
+        df_sem_intervalo = df[mask_sem_intervalo].copy()
+        
+        if df_sem_intervalo.empty:
+            st.info("Todas as equipes listadas já possuem intervalos atribuídos.")
+        else:
+            idx_atribuir = st.selectbox(
+                "Selecione a equipe para abrir o intervalo:",
+                df_sem_intervalo.index,
+                format_func=lambda i: f"Data: {df_sem_intervalo.at[i,'Data']} | Equipe: {df_sem_intervalo.at[i,'Prefixo']}",
+                key="sb_atribuir"
+            )
+            
+            row_atr = df.loc[idx_atribuir]
+            
+            with st.form("form_atribuir_intervalo"):
+                st.markdown(f"### Atribuir Início para: **{row_atr['Prefixo']}**")
+                c1, c2 = st.columns(2)
+                inicio_intervalo = c1.text_input("⏳ Definir Horário de Início (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
+                motivo_atr = c2.text_input("📌 Motivo / Justificativa", value="")
+                
+                submitted_inicio = st.form_submit_button("➕ Abrir Intervalo da Equipe", type="primary")
+                
+            if submitted_inicio:
+                df.at[idx_atribuir, "Intervalo"] = inicio_intervalo
+                df.at[idx_atribuir, "Motivo"] = motivo_atr
+                
+                # Atualiza também a estatística do histórico para registrar que houve um intervalo associado
+                ws_hist = get_or_create_sheet(client, sid, "Histórico")
+                if ws_hist:
+                    df_hist = load_sheet_df(ws_hist)
+                    hoje_obj = date.today()
+                    mes_m = hoje_obj.strftime("%Y-%m")
+                    sem_s = hoje_obj.strftime("%Y-W%W")
+                    
+                    mask_h = (df_hist.get("Mês", pd.Series()) == mes_m) & \
+                             (df_hist.get("Prefixo", pd.Series()) == row_atr['Prefixo']) & \
+                             (df_hist.get("Semana", pd.Series()) == sem_s)
+                             
+                    if not df_hist.empty and mask_h.any():
+                        idx_h = df_hist[mask_h].index[0]
+                        df_hist.at[idx_h, "Intervalos na Semana"] = int(df_hist.at[idx_h, "Intervalos na Semana"] or 0) + 1
+                        df_hist.at[idx_h, "Intervalos no Mês"] = int(df_hist.at[idx_h, "Intervalos no Mês"] or 0) + 1
+                        
+                        ws_hist.clear()
+                        dados_h = [HEADERS_HISTORICO]
+                        for _, r in df_hist.iterrows():
+                            dados_h.append([str(r.get(h, "")) for h in HEADERS_HISTORICO])
+                        ws_hist.append_rows(dados_h)
+
+                try:
+                    ws.clear()
+                    dados_edicao = [HEADERS_TURNOS]
+                    for _, r in df.iterrows():
+                        dados_edicao.append([str(r.get(h, "")) for h in HEADERS_TURNOS])
+                    ws.append_rows(dados_edicao)
+                    st.success(f"✅ Intervalo da equipe {row_atr['Prefixo']} iniciado às {inicio_intervalo}!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
+
+    st.markdown("---")
+    st.subheader("📊 Visualização de Todos os Dados da Planilha")
+    
+    # Filtros de visualização geral
     col1, col2 = st.columns(2)
     datas = sorted(df["Data"].unique(), reverse=True) if "Data" in df.columns else []
-    data_sel = col1.selectbox("Filtrar por Data", ["Todas"] + datas)
+    data_sel = col1.selectbox("Filtrar Tabela por Data", ["Todas"] + datas)
     prefixos = sorted(df["Prefixo"].unique()) if "Prefixo" in df.columns else []
-    prefixo_sel = col2.selectbox("Filtrar por Prefixo", ["Todos"] + prefixos)
+    prefixo_sel = col2.selectbox("Filtrar Tabela por Prefixo", ["Todos"] + prefixos)
 
     df_filtrado = df.copy()
     if data_sel != "Todas":
         df_filtrado = df_filtrado[df_filtrado["Data"] == data_sel]
     if prefixo_sel != "Todos":
         df_filtrado = df_filtrado[df_filtrado["Prefixo"] == prefixo_sel]
-
-    st.subheader(f"📝 {len(df_filtrado)} registro(s) encontrado(s)")
-
-    if df_filtrado.empty:
-        st.info("Nenhum registro para os filtros selecionados.")
-        return
-
-    # Edição linha a linha
-    idx_sel = st.selectbox(
-        "Selecione o registro para editar",
-        df_filtrado.index,
-        format_func=lambda i: f"{df_filtrado.at[i,'Data']} | {df_filtrado.at[i,'Prefixo']}",
-    )
-    row = df.loc[idx_sel]
-
-    st.markdown("---")
-    with st.form("form_edicao"):
-        c1, c2 = st.columns(2)
-        fim_intervalo = c1.text_input("🕐 Fim de Intervalo (HH:MM:SS)", value=str(row.get("Fim de Intervalo", "")))
-        motivo = c2.text_input("📌 Motivo", value=str(row.get("Motivo", "")))
-        ocorrencia = st.text_area("📋 Ocorrência", value=str(row.get("Ocorrência", "")), height=100)
-
-        submitted = st.form_submit_button("💾 Salvar Alterações", type="primary")
-
-    if submitted:
-        df.at[idx_sel, "Fim de Intervalo"] = fim_intervalo
-        df.at[idx_sel, "Motivo"] = motivo
-        df.at[idx_sel, "Ocorrência"] = ocorrencia
-        try:
-            ws.clear()
-            ws.append_row(HEADERS_TURNOS)
-            for _, r in df.iterrows():
-                ws.append_row([str(r.get(h, "")) for h in HEADERS_TURNOS])
-            st.success("✅ Registro atualizado com sucesso!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao salvar: {e}")
-
-    st.markdown("---")
-    st.subheader("📊 Visualização completa")
+        
     st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
 
 
 def pagina_historico():
     st.title("📈 Histórico de Turnos e Intervalos")
 
-    if not (st.session_state.get("gsheet_creds") and st.session_state.get("spreadsheet_id")):
+    client = get_gsheet_client()
+    sid = get_spreadsheet_id()
+    
+    if not (client and sid):
         st.warning("Configure o Google Sheets na aba **Configurações**.")
         return
 
-    client = get_gsheet_client()
-    if client is None:
-        return
-
-    sid = st.session_state["spreadsheet_id"]
     ws = get_or_create_sheet(client, sid, "Histórico")
     if ws is None:
         return
@@ -559,7 +651,6 @@ def pagina_historico():
 def pagina_config():
     st.title("⚙️ Configurações do Google Sheets")
 
-    # ── Status atual ──
     client = get_gsheet_client()
     sid = get_spreadsheet_id()
     if client and sid:
@@ -573,64 +664,23 @@ def pagina_config():
 
     st.markdown("---")
 
-    # ── Opção 1: secrets.toml (recomendado) ──
     with st.expander("📁 Opção 1 — secrets.toml (recomendado para deploy)", expanded=True):
         st.markdown("""
 **Passo a passo:**
-
-**1.** Crie a pasta `.streamlit` na raiz do projeto e o arquivo `secrets.toml` dentro dela:
-```
-seu_projeto/
-├── app.py
-├── requirements.txt
-└── .streamlit/
-    └── secrets.toml
-```
-
-**2.** Abra o `secrets.toml` e cole exatamente assim:
-```toml
-spreadsheet_id = "ID_DA_SUA_PLANILHA_AQUI"
-
-[gcp_service_account]
-type = "service_account"
-project_id = "seu-projeto"
-private_key_id = "abc123..."
-private_key = \"\"\"-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA...
------END RSA PRIVATE KEY-----\"\"\"
-client_email = "seu-app@seu-projeto.iam.gserviceaccount.com"
-client_id = "123456789"
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
-universe_domain = "googleapis.com"
-```
-
-> ⚠️ **Atenção com a `private_key`:** a chave RSA tem quebras de linha reais.
-> Use `\"\"\"` (três aspas) para envolver o valor, como no exemplo acima.
-> Nunca use `\\n` literal — o Streamlit lê o TOML corretamente com `\"\"\"`.
-
-**3.** Adicione `.streamlit/secrets.toml` ao `.gitignore` para não vazar credenciais.
-
-**4.** No **Streamlit Cloud** (deploy): vá em **App → Settings → Secrets** e cole o mesmo conteúdo do `secrets.toml`.
+**1.** Crie a pasta `.streamlit` na raiz do projeto e o arquivo `secrets.toml` dentro dela.
+**2.** Abra o `secrets.toml` e cole com as três aspas na private_key conforme o padrão TOML.
         """)
 
-    # ── Opção 2: manual na sessão ──
     with st.expander("🔑 Opção 2 — Configuração manual (apenas nesta sessão)"):
-        st.markdown("Cole o JSON da Service Account e o ID da planilha. Os dados ficam apenas na memória e são perdidos ao fechar o app.")
-
         creds_json = st.text_area(
             "Conteúdo do JSON de credenciais:",
             value=json.dumps(st.session_state.get("gsheet_creds", {}), indent=2) if st.session_state.get("gsheet_creds") else "",
             height=220,
-            placeholder='{"type": "service_account", "project_id": "...", "private_key": "...", ...}',
         )
 
         spreadsheet_id_input = st.text_input(
             "ID da planilha:",
             value=st.session_state.get("spreadsheet_id", ""),
-            placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
         )
 
         col1, col2 = st.columns(2)
@@ -644,30 +694,8 @@ universe_domain = "googleapis.com"
                     ss = c.open_by_key(spreadsheet_id_input.strip())
                     st.success(f"✅ Conectado: **{ss.title}**")
                     st.rerun()
-                except json.JSONDecodeError:
-                    st.error("JSON inválido. Verifique o conteúdo.")
                 except Exception as e:
                     st.error(f"Erro ao conectar: {e}")
-            else:
-                st.warning("Insira as credenciais.")
-
-        if col2.button("🗑️ Limpar sessão"):
-            st.session_state.pop("gsheet_creds", None)
-            st.session_state.pop("spreadsheet_id", None)
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("📋 Como obter as credenciais")
-    st.markdown("""
-1. Acesse [console.cloud.google.com](https://console.cloud.google.com)
-2. Crie ou selecione um projeto
-3. Ative as APIs: **Google Sheets API** e **Google Drive API**
-4. Vá em **IAM → Contas de serviço → Criar conta de serviço**
-5. Gere uma **chave JSON** (Chaves → Adicionar chave → JSON)
-6. No Google Sheets, **compartilhe a planilha** com o e-mail da service account como **Editor**
-7. Copie o ID da URL da planilha:
-   `https://docs.google.com/spreadsheets/d/**SEU_ID**/edit`
-    """)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -682,7 +710,8 @@ def main():
             ["📋 Turnos do Dia", "✏️ Editar Registros", "📈 Histórico", "⚙️ Configurações"],
         )
         st.markdown("---")
-        st.caption(f"Data: {date.today().strftime('%d/%m/%Y')}")
+        st.caption(f"Data: {date.today().strftime('%%d/%%m/%%Y')}")
+        
         if get_gsheet_client() and get_spreadsheet_id():
             st.success("Google Sheets ✅")
         else:
