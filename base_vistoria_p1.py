@@ -19,7 +19,6 @@ WA_RECIPIENT = st.secrets.get("RECIPIENT_NUMBER", "")
 
 
 # ── Mapeamento de nomes alternativos de colunas ───────────────────────────────
-# Chave = nome canônico usado no código | Valor = lista de aliases aceitos
 COLUMN_ALIASES = {
     "Subtipo":        ["Subtipo", "SubTipoDescricao"],
     "Data Inclusão":  ["Data Inclusão", "Data Inclusao", "DataInclusao"],
@@ -37,6 +36,61 @@ def normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=renomear)
 
 
+# ── Limpeza de valores monetários ────────────────────────────────────────────
+
+def limpar_valor_monetario(serie: pd.Series) -> pd.Series:
+    """
+    Converte strings monetárias com formato ambíguo para float.
+
+    Trata casos como '477.463546.681197.07' onde múltiplos pontos
+    foram usados como separadores de milhar junto com o decimal.
+    Estratégia: tudo antes do último ponto é parte inteira (sem pontos),
+    o último segmento é a parte decimal.
+
+    Exemplos:
+      '1234.56'              → 1234.56
+      '1.234,56'             → 1234.56
+      '477.463546.681197.07' → 477463546681197.07
+      '1234'                 → 1234.0
+    """
+    def parse_valor(v):
+        if pd.isna(v) or str(v).strip() in ("", "-"):
+            return 0.0
+        s = str(v).strip().replace(" ", "").replace("R$", "").replace("\xa0", "")
+
+        # Formato brasileiro com vírgula decimal: '1.234,56'
+        if "," in s:
+            s = s.replace(".", "").replace(",", ".")
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
+        # Sem vírgula — pode ter múltiplos pontos
+        partes = s.split(".")
+        if len(partes) == 1:
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+        elif len(partes) == 2:
+            # Ex: '1234.56' — ponto único tratado como decimal
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+        else:
+            # Múltiplos pontos: todos são milhar exceto o último (decimal)
+            inteiro = "".join(partes[:-1])
+            decimal = partes[-1]
+            try:
+                return float(f"{inteiro}.{decimal}")
+            except ValueError:
+                return 0.0
+
+    return serie.apply(parse_valor)
+
+
 # ── Leitura de XML ────────────────────────────────────────────────────────────
 
 def ler_xml(conteudo: bytes) -> pd.DataFrame:
@@ -45,18 +99,16 @@ def ler_xml(conteudo: bytes) -> pd.DataFrame:
 
     Suporta três formatos:
       1. SpreadsheetML — XML gerado pelo Excel/Office com namespace
-         urn:schemas-microsoft-com:office:spreadsheet  (ex.: exportações do Oper)
+         urn:schemas-microsoft-com:office:spreadsheet
       2. XML genérico com sub-elementos como colunas
-         <root><row><Col1>val</Col1></row></root>
       3. XML genérico com atributos como colunas
-         <root><row Col1="val"/></root>
     """
     try:
         root = ET.fromstring(conteudo)
     except ET.ParseError as e:
         raise ValueError(f"XML inválido: {e}")
 
-    # ── 1. SpreadsheetML (namespace Office/Excel) ──────────────────────────
+    # ── 1. SpreadsheetML ──────────────────────────────────────────────────
     NS = "urn:schemas-microsoft-com:office:spreadsheet"
 
     def tag(nome):
@@ -116,7 +168,7 @@ def ler_xml(conteudo: bytes) -> pd.DataFrame:
             df = df[df.apply(lambda r: any(str(v).strip() for v in r), axis=1)].reset_index(drop=True)
             return df
 
-    # ── 2 & 3. XML genérico ────────────────────────────────────────────────
+    # ── 2 & 3. XML genérico ───────────────────────────────────────────────
     filhos = list(root)
     if not filhos:
         raise ValueError("XML sem elementos filhos na raiz.")
@@ -173,7 +225,13 @@ def ler_arquivo(arquivo) -> pd.DataFrame:
     else:
         raise ValueError(f"Formato de arquivo não suportado: {nome}")
 
-    return normalizar_colunas(df)
+    df = normalizar_colunas(df)
+
+    # ── Limpeza da coluna monetária ──────────────────────────────────────
+    if "Valor Faturas" in df.columns:
+        df["Valor Faturas"] = limpar_valor_monetario(df["Valor Faturas"])
+
+    return df
 
 
 # ── Gerar Excel ───────────────────────────────────────────────────────────────
