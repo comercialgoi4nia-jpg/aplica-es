@@ -169,34 +169,56 @@ if file_abertas and file_executadas:
             st.info(f"ℹ️ Coluna identificada na base de Executadas: **\"{col_misc_ex}\"** → tratada como MISCELANEA.")
             df_ex = df_ex.rename(columns={col_misc_ex: "MISCELANEA"})
 
-        # Fill empty MISCELANEA in executadas
-        df_ex["MISCELANEA"] = df_ex["MISCELANEA"].apply(
-            lambda v: "ABRIR MISCELANEA" if normalize(v) == "" else v
+        # Lista de valores normalizados da coluna miscelanea nas executadas (apenas não-vazios)
+        exec_misc_lista = [
+            normalize(v) for v in df_ex["MISCELANEA"]
+            if normalize(v) != ""
+        ]
+
+        # Linhas da executada com miscelanea vazia recebem marcação ABRIR MISCELANEA
+        df_ex["MISCELANEA_STATUS"] = df_ex["MISCELANEA"].apply(
+            lambda v: "ABRIR MISCELANEA" if normalize(v) == "" else normalize(v)
         )
 
-        # Build set of miscelaneas from executadas (normalized)
-        exec_misc_set = set(df_ex["MISCELANEA"].apply(normalize)) - {"", "ABRIR MISCELANEA"}
+        def contem_miscelanea(val_ab):
+            """Retorna True se val_ab (aberta) está contido em algum valor da executada ou vice-versa."""
+            n = normalize(val_ab)
+            if n == "":
+                return False
+            for ex in exec_misc_lista:
+                if n in ex or ex in n:
+                    return True
+            return False
+
+        def buscar_match_executada(val_ab):
+            """Retorna o valor original da executada que fez match, ou None."""
+            n = normalize(val_ab)
+            if n == "":
+                return None
+            for _, row in df_ex.iterrows():
+                ex_norm = normalize(row["MISCELANEA"])
+                if ex_norm == "":
+                    continue
+                if n in ex_norm or ex_norm in n:
+                    return row["MISCELANEA"]
+            return None
 
         # Build result from abertas
         cols_abertas = [c for c in COLUNAS_ABERTAS if c in df_ab.columns]
         df_resultado = df_ab[cols_abertas].copy()
 
-        # Add status
+        # Status: EXECUTADA se contém match, senão NÃO EXECUTADA
         df_resultado["STATUS"] = df_resultado["MISCELANEA"].apply(
-            lambda v: "EXECUTADA" if normalize(v) in exec_misc_set else "NÃO EXECUTADA"
+            lambda v: "EXECUTADA" if contem_miscelanea(v) else "NÃO EXECUTADA"
         )
 
-        # Add MISCELANEA from executadas side (for reference)
-        # Map: misc_ab -> misc_ex entry
-        exec_misc_map = {}
-        for _, row in df_ex.iterrows():
-            k = normalize(row["MISCELANEA"])
-            if k not in ("", "ABRIR MISCELANEA"):
-                exec_misc_map[k] = row["MISCELANEA"]
-
+        # Coluna com o valor da executada que fez match (ou ABRIR MISCELANEA se vazio)
         df_resultado["MISCELANEA_EXECUTADAS"] = df_resultado["MISCELANEA"].apply(
-            lambda v: exec_misc_map.get(normalize(v), "ABRIR MISCELANEA" if normalize(v) == "" else "NÃO ENCONTRADA")
+            lambda v: buscar_match_executada(v) or ("ABRIR MISCELANEA" if normalize(v) == "" else "NÃO ENCONTRADA")
         )
+
+        # Conta linhas com ABRIR MISCELANEA (vazias na executada)
+        abrir_misc_count = (df_ex["MISCELANEA_STATUS"] == "ABRIR MISCELANEA").sum()
 
         # Reorder columns: put STATUS first
         cols_order = ["STATUS"] + [c for c in df_resultado.columns if c != "STATUS"]
@@ -208,7 +230,7 @@ if file_abertas and file_executadas:
         total = len(df_resultado)
         executadas = (df_resultado["STATUS"] == "EXECUTADA").sum()
         nao_executadas = (df_resultado["STATUS"] == "NÃO EXECUTADA").sum()
-        abrir_misc = (df_resultado["MISCELANEA_EXECUTADAS"] == "ABRIR MISCELANEA").sum()
+        abrir_misc = abrir_misc_count
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total (Abertas)", total)
