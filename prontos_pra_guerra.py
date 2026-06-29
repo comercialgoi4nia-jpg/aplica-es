@@ -65,7 +65,7 @@ def encontrar_col_miscelanea(df):
             return col
     return None
 
-def gerar_excel(df_resultado):
+def gerar_excel(df_resultado, df_abrir_misc=None, col_end_ex=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Conferência"
@@ -129,6 +129,41 @@ def gerar_excel(df_resultado):
     ws.row_dimensions[1].height = 30
     ws.freeze_panes = "A2"
 
+    # Aba ABRIR MISCELANEA: linhas da executada sem miscelânea preenchida
+    if df_abrir_misc is not None and len(df_abrir_misc) > 0:
+        ws_ab = wb.create_sheet("ABRIR MISCELANEA")
+        # Escolhe colunas relevantes: miscelanea + endereço + demais disponíveis
+        cols_show = list(df_abrir_misc.columns)
+        # Garante endereço aparece em destaque
+        if col_end_ex and col_end_ex in cols_show:
+            cols_show = [col_end_ex] + [c for c in cols_show if c != col_end_ex and c != "MISCELANEA_STATUS"]
+        else:
+            cols_show = [c for c in cols_show if c != "MISCELANEA_STATUS"]
+        df_show_ab = df_abrir_misc[cols_show]
+
+        # Cabeçalho
+        for ci, h in enumerate(df_show_ab.columns, 1):
+            cell = ws_ab.cell(row=1, column=ci, value=h)
+            cell.fill = PatternFill("solid", fgColor="FF9900")
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = Border(left=Side(style="thin"), right=Side(style="thin"),
+                                 top=Side(style="thin"), bottom=Side(style="thin"))
+        # Dados
+        for ri, row in enumerate(df_show_ab.itertuples(index=False), 2):
+            for ci, val in enumerate(row, 1):
+                cell = ws_ab.cell(row=ri, column=ci, value=val)
+                cell.fill = PatternFill("solid", fgColor="FFEB9C")
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+                cell.border = Border(left=Side(style="thin"), right=Side(style="thin"),
+                                     top=Side(style="thin"), bottom=Side(style="thin"))
+        # Auto-width
+        for ci, col_cells in enumerate(ws_ab.columns, 1):
+            max_len = max((len(str(c.value or "")) for c in col_cells), default=10)
+            ws_ab.column_dimensions[get_column_letter(ci)].width = min(max_len + 4, 45)
+        ws_ab.row_dimensions[1].height = 30
+        ws_ab.freeze_panes = "A2"
+
     # Legend sheet
     ws2 = wb.create_sheet("Legenda")
     ws2["A1"] = "Legenda de Cores"
@@ -190,18 +225,25 @@ if file_abertas and file_executadas:
                     return True
             return False
 
+        # Detectar coluna Endereço na base de executadas (case-insensitive)
+        col_end_ex = next(
+            (c for c in df_ex.columns if "endere" in normalizar_nome_col(c).lower()),
+            None
+        )
+
         def buscar_match_executada(val_ab):
-            """Retorna o valor original da executada que fez match, ou None."""
+            """Retorna (valor_miscelanea, endereco) da executada que fez match, ou (None, None)."""
             n = normalize(val_ab)
             if n == "":
-                return None
+                return None, None
             for _, row in df_ex.iterrows():
                 ex_norm = normalize(row["MISCELANEA"])
                 if ex_norm == "":
                     continue
                 if n in ex_norm or ex_norm in n:
-                    return row["MISCELANEA"]
-            return None
+                    end = str(row[col_end_ex]).strip() if col_end_ex and col_end_ex in row.index else ""
+                    return row["MISCELANEA"], end
+            return None, None
 
         # Build result from abertas
         cols_abertas = [c for c in COLUNAS_ABERTAS if c in df_ab.columns]
@@ -212,13 +254,50 @@ if file_abertas and file_executadas:
             lambda v: "EXECUTADA" if contem_miscelanea(v) else "NÃO EXECUTADA"
         )
 
-        # Coluna com o valor da executada que fez match (ou ABRIR MISCELANEA se vazio)
-        df_resultado["MISCELANEA_EXECUTADAS"] = df_resultado["MISCELANEA"].apply(
-            lambda v: buscar_match_executada(v) or ("ABRIR MISCELANEA" if normalize(v) == "" else "NÃO ENCONTRADA")
+        # Coluna com o valor da executada que fez match + endereço
+        matches = df_resultado["MISCELANEA"].apply(
+            lambda v: buscar_match_executada(v)
         )
+        df_resultado["MISCELANEA_EXECUTADAS"] = matches.apply(
+            lambda t: t[0] if t[0] else ("ABRIR MISCELANEA" if True else "NÃO ENCONTRADA")
+        )
+        # Corrigir: NÃO ENCONTRADA quando a aberta não está vazia mas não teve match
+        def status_misc(v, t):
+            if t[0]:
+                return t[0]
+            if normalize(v) == "":
+                return "ABRIR MISCELANEA"
+            return "NÃO ENCONTRADA"
+        df_resultado["MISCELANEA_EXECUTADAS"] = [
+            status_misc(v, t)
+            for v, t in zip(df_resultado["MISCELANEA"], matches)
+        ]
+        # Endereço da executada para linhas com ABRIR MISCELANEA
+        # Pega endereços das linhas da executada que têm miscelanea vazia
+        if col_end_ex:
+            enderecos_abrir = df_ex[df_ex["MISCELANEA_STATUS"] == "ABRIR MISCELANEA"][col_end_ex].dropna().tolist()
+        else:
+            enderecos_abrir = []
+
+        # Coluna ENDEREÇO_ABRIR_MISCELANEA: preenche com endereço do match quando executou,
+        # ou com os endereços das linhas sem miscelânea (ABRIR MISCELANEA) para não executadas
+        def obter_endereco(v, t, idx_row):
+            if t[0]:
+                # executada: endereço da linha que fez match
+                return t[1]
+            if normalize(v) == "":
+                return ""
+            return ""
+        df_resultado["ENDEREÇO_ABRIR_MISCELANEA"] = [
+            obter_endereco(v, t, i)
+            for i, (v, t) in enumerate(zip(df_resultado["MISCELANEA"], matches))
+        ]
+
+        # Adiciona aba extra no Excel com as linhas ABRIR MISCELANEA da base executadas
+        df_abrir_misc = df_ex[df_ex["MISCELANEA_STATUS"] == "ABRIR MISCELANEA"].copy()
 
         # Conta linhas com ABRIR MISCELANEA (vazias na executada)
-        abrir_misc_count = (df_ex["MISCELANEA_STATUS"] == "ABRIR MISCELANEA").sum()
+        abrir_misc_count = len(df_abrir_misc)
 
         # Reorder columns: put STATUS first
         cols_order = ["STATUS"] + [c for c in df_resultado.columns if c != "STATUS"]
