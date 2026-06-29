@@ -48,6 +48,18 @@ def normalize(val):
         return ""
     return str(val).strip().upper()
 
+def normalizar_nome_col(nome):
+    """Remove acentos e converte para maiúsculo para comparação de nomes de colunas."""
+    import unicodedata
+    return unicodedata.normalize("NFD", str(nome)).encode("ascii", "ignore").decode("ascii").upper().strip()
+
+def encontrar_col_miscelanea(df):
+    """Encontra a coluna que contenha 'MISCELANEA' no nome, ignorando acentos e capitalização."""
+    for col in df.columns:
+        if "MISCELANEA" in normalizar_nome_col(col):
+            return col
+    return None
+
 def gerar_excel(df_resultado):
     wb = Workbook()
     ws = wb.active
@@ -144,9 +156,13 @@ if file_abertas and file_executadas:
         if "MISCELANEA" not in df_ab.columns:
             st.error("❌ Coluna **MISCELANEA** não encontrada na base de Abertas. Verifique o arquivo.")
             st.stop()
-        if "MISCELANEA" not in df_ex.columns:
-            st.error("❌ Coluna **MISCELANEA** não encontrada na base de Executadas. Verifique o arquivo.")
+        col_misc_ex = encontrar_col_miscelanea(df_ex)
+        if col_misc_ex is None:
+            st.error("❌ Nenhuma coluna com 'Miscelânea' encontrada na base de Executadas. Verifique o arquivo.")
             st.stop()
+        if col_misc_ex != "MISCELANEA":
+            st.info(f"ℹ️ Coluna identificada na base de Executadas: **\"{col_misc_ex}\"** → tratada como MISCELANEA.")
+            df_ex = df_ex.rename(columns={col_misc_ex: "MISCELANEA"})
 
         # Fill empty MISCELANEA in executadas
         df_ex["MISCELANEA"] = df_ex["MISCELANEA"].apply(
