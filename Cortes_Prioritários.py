@@ -135,10 +135,10 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ─── COLUNAS DE SAÍDA — Endereço adicionado ao final ───
+# ─── COLUNAS DE SAÍDA — Endereço e Bairro incluídos ───
 COLUNAS_SAIDA = [
     'Numero', 'Subtipo', 'Data Inclusão', 'Prefixo',
-    'Instalação CCS', 'Situação', 'Valor Faturas', 'Quantidade Faturas', 'Endereço'
+    'Instalação CCS', 'Situação', 'Valor Faturas', 'Quantidade Faturas', 'Endereço', 'Bairro'
 ]
 
 SUBTIPOS_EXCLUIR_ARRECADADO = [
@@ -240,7 +240,7 @@ def gerar_excel(df: pd.DataFrame, modalidade: str) -> bytes:
                 cell.number_format = 'DD/MM/YYYY'
             elif col_name in ('Numero', 'Prefixo', 'Instalação CCS', 'Situação'):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-            elif col_name == 'Endereço':
+            elif col_name in ('Endereço', 'Bairro'):
                 cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
@@ -251,8 +251,8 @@ def gerar_excel(df: pd.DataFrame, modalidade: str) -> bytes:
             len(str(col_name)),
             *[len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, ws.max_row + 1)]
         )
-        # Endereço pode ser longo — limita um pouco mais
-        limite = 60 if col_name == 'Endereço' else 45
+        # Endereço e Bairro podem ser longos — limita um pouco mais
+        limite = 60 if col_name == 'Endereço' else 35 if col_name == 'Bairro' else 45
         ws.column_dimensions[col_letter].width = min(max_len + 4, limite)
 
     ws.freeze_panes = "A2"
