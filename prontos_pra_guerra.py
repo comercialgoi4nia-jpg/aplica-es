@@ -49,14 +49,19 @@ def normalize(val):
     return str(val).strip().upper()
 
 def normalizar_nome_col(nome):
-    """Remove acentos e converte para maiúsculo para comparação de nomes de colunas."""
+    """Remove acentos, espaços extras e converte para maiúsculo."""
     import unicodedata
-    return unicodedata.normalize("NFD", str(nome)).encode("ascii", "ignore").decode("ascii").upper().strip()
+    import re
+    s = str(nome).strip()
+    s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Za-z0-9]", "", s).upper()
+    return s
 
 def encontrar_col_miscelanea(df):
-    """Encontra a coluna que contenha 'MISCELANEA' no nome, ignorando acentos e capitalização."""
+    """Encontra coluna cujo nome normalizado contenha MISCELANEA."""
     for col in df.columns:
-        if "MISCELANEA" in normalizar_nome_col(col):
+        norm = normalizar_nome_col(col)
+        if "MISCELANEA" in norm:
             return col
     return None
 
