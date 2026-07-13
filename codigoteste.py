@@ -1,435 +1,568 @@
 import streamlit as st
 import pandas as pd
+import xml.etree.ElementTree as ET
 import io
-import requests
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import (
+    PatternFill, Font, Alignment, Border, Side, GradientFill
+)
 from openpyxl.utils import get_column_letter
 
+st.set_page_config(
+    page_title="Relatório de Serviços Prioritários",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# ── Credenciais WhatsApp Cloud API ───────────────────────────────────────────
-WA_TOKEN     = st.secrets.get("WHATSAPP_TOKEN", "")
-WA_PHONE_ID  = st.secrets.get("PHONE_NUMBER_ID", "")
-WA_RECIPIENT = st.secrets.get("RECIPIENT_NUMBER", "")
-
-
-# ── Gerar Excel ───────────────────────────────────────────────────────────────
-
-def gerar_excel(tabela: pd.DataFrame) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Acomp. P1"
-
-    AZUL_HEADER = "2E5F9E"
-    AZUL_TITULO = "1F4E79"
-    BRANCO      = "FFFFFF"
-    CINZA_LINHA = "DEEAF1"
-
-    thin = Side(style="thin", color="AAAAAA")
-    borda = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    ws.merge_cells("A1:F1")
-    c = ws["A1"]
-    c.value = "Acompanhamento de Suspensão/Vistoria P1"
-    c.font = Font(name="Arial", bold=True, color=BRANCO, size=13)
-    c.fill = PatternFill("solid", fgColor=AZUL_TITULO)
-    c.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 22
-
-    headers = ["DATA", "P1 SUSPENSÃO - GRUPO A", "P1 SUSPENSÃO - POSTE",
-               "P1 VISTORIA - RETIRADA DE RAMAL", "Total Geral", "Total Dívida"]
-    for col_idx, h in enumerate(headers, start=1):
-        c = ws.cell(row=2, column=col_idx, value=h)
-        c.font = Font(name="Arial", bold=True, color=BRANCO, size=10)
-        c.fill = PatternFill("solid", fgColor=AZUL_HEADER)
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = borda
-    ws.row_dimensions[2].height = 30
-
-    meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
-             "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
-
-    for i, row in enumerate(tabela.itertuples(index=False), start=3):
-        fill_cor = PatternFill("solid", fgColor=CINZA_LINHA if i % 2 == 0 else BRANCO)
-        data_str = row[0].strftime("%d/%b")
-        for en, pt in meses.items():
-            data_str = data_str.replace(en, pt)
-
-        c = ws.cell(row=i, column=1, value=data_str)
-        c.font = Font(name="Arial", size=10)
-        c.alignment = Alignment(horizontal="center")
-        c.fill = fill_cor
-        c.border = borda
-
-        for col_idx, val in enumerate([row[1], row[2], row[3], row[4]], start=2):
-            c = ws.cell(row=i, column=col_idx, value=int(val))
-            c.font = Font(name="Arial", size=10, bold=(col_idx == 5))
-            c.alignment = Alignment(horizontal="center")
-            c.fill = fill_cor
-            c.border = borda
-
-        c = ws.cell(row=i, column=6, value=row[5])
-        c.number_format = 'R$ #,##0.00'
-        c.font = Font(name="Arial", size=10)
-        c.alignment = Alignment(horizontal="right")
-        c.fill = fill_cor
-        c.border = borda
-
-    total_row = ws.max_row + 1
-    data_start, data_end = 3, total_row - 1
-    ws.cell(row=total_row, column=1, value="Total Geral").font = Font(name="Arial", bold=True, color=BRANCO, size=10)
-    ws.cell(row=total_row, column=1).fill = PatternFill("solid", fgColor=AZUL_HEADER)
-    ws.cell(row=total_row, column=1).alignment = Alignment(horizontal="center")
-    ws.cell(row=total_row, column=1).border = borda
-
-    for col_idx, col_letter in enumerate(["B","C","D","E","F"], start=2):
-        c = ws.cell(row=total_row, column=col_idx)
-        c.value = f"=SUM({col_letter}{data_start}:{col_letter}{data_end})"
-        c.font = Font(name="Arial", bold=True, color=BRANCO, size=10)
-        c.fill = PatternFill("solid", fgColor=AZUL_HEADER)
-        c.alignment = Alignment(horizontal="center" if col_idx < 6 else "right")
-        c.border = borda
-        if col_idx == 6:
-            c.number_format = 'R$ #,##0.00'
-
-    for i, w in enumerate([12, 26, 22, 34, 14, 18], start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
-
-
-# ── Gerar Imagem da Tabela ────────────────────────────────────────────────────
-
-def gerar_imagem_tabela(tabela: pd.DataFrame, divida_dia: pd.Series) -> bytes:
-    meses = {"Jan":"jan","Feb":"fev","Mar":"mar","Apr":"abr","May":"mai","Jun":"jun",
-             "Jul":"jul","Aug":"ago","Sep":"set","Oct":"out","Nov":"nov","Dec":"dez"}
-
-    linhas = []
-    for row in tabela.itertuples(index=False):
-        data_str = row[0].strftime("%d/%b")
-        for en, pt in meses.items():
-            data_str = data_str.replace(en, pt)
-        divida_fmt = f"R$ {float(row[5]):,.2f}".replace(",","X").replace(".",",").replace("X",".")
-        linhas.append([
-            data_str,
-            str(int(row[1])),
-            str(int(row[2])),
-            str(int(row[3])),
-            str(int(row[4])),
-            divida_fmt,
-        ])
-
-    t1 = int(tabela.iloc[:,1].sum())
-    t2 = int(tabela.iloc[:,2].sum())
-    t3 = int(tabela.iloc[:,3].sum())
-    t4 = int(tabela.iloc[:,4].sum())
-    t5 = divida_dia.sum()
-    t5_fmt = f"R$ {t5:,.2f}".replace(",","X").replace(".",",").replace("X",".")
-    linhas.append(["TOTAL GERAL", str(t1), str(t2), str(t3), str(t4), t5_fmt])
-
-    headers = ["DATA", "P1 SUSPENSÃO\nGRUPO A", "P1 SUSPENSÃO\nPOSTE",
-               "P1 VISTORIA\nRET. RAMAL", "TOTAL\nGERAL", "TOTAL DÍVIDA"]
-
-    n_rows = len(linhas)
-    n_cols = len(headers)
-
-    COR_TITULO  = "#1F4E79"
-    COR_HEADER  = "#2E5F9E"
-    COR_LISTA   = "#DEEAF1"
-    COR_BRANCO  = "#FFFFFF"
-    COR_TOTAL   = "#2E5F9E"
-    COR_TEXTO   = "#1a1a2e"
-    COR_TXBCO   = "#FFFFFF"
-
-    fig_w = 16
-    row_h = 0.55
-    header_h = 0.75
-    title_h = 0.65
-    fig_h = title_h + header_h + n_rows * row_h + 0.3
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    fig.patch.set_facecolor(COR_BRANCO)
-    ax.set_facecolor(COR_BRANCO)
-    ax.axis("off")
-
-    total_h = fig_h
-    y_cursor = total_h
-
-    # Título
-    y_cursor -= title_h
-    title_rect = mpatches.FancyBboxPatch(
-        (0, y_cursor), fig_w, title_h,
-        boxstyle="square,pad=0",
-        linewidth=0, facecolor=COR_TITULO,
-        transform=ax.transData, clip_on=False
-    )
-    ax.add_patch(title_rect)
-    ax.text(fig_w / 2, y_cursor + title_h / 2,
-            "Acompanhamento de Suspensão / Vistoria P1",
-            ha="center", va="center",
-            fontsize=13, fontweight="bold", color=COR_TXBCO,
-            transform=ax.transData)
-
-    # Cabeçalho
-    y_cursor -= header_h
-    col_widths = [1.6, 2.8, 2.4, 2.8, 1.6, 2.4]
-    total_w = sum(col_widths)
-    scale = fig_w / total_w
-    col_widths_px = [w * scale for w in col_widths]
-
-    x = 0
-    for j, (h, cw) in enumerate(zip(headers, col_widths_px)):
-        rect = mpatches.FancyBboxPatch(
-            (x, y_cursor), cw, header_h,
-            boxstyle="square,pad=0",
-            linewidth=0, facecolor=COR_HEADER,
-            transform=ax.transData, clip_on=False
-        )
-        ax.add_patch(rect)
-        ax.text(x + cw / 2, y_cursor + header_h / 2, h,
-                ha="center", va="center",
-                fontsize=8.5, fontweight="bold", color=COR_TXBCO,
-                linespacing=1.3, transform=ax.transData)
-        x += cw
-
-    # Linhas de dados
-    for i, linha in enumerate(linhas):
-        y_cursor -= row_h
-        is_total = (i == len(linhas) - 1)
-        cor_fundo = COR_TOTAL if is_total else (COR_LISTA if i % 2 == 0 else COR_BRANCO)
-        cor_txt   = COR_TXBCO if is_total else COR_TEXTO
-        peso      = "bold" if is_total else "normal"
-
-        x = 0
-        for j, (val, cw) in enumerate(zip(linha, col_widths_px)):
-            rect = mpatches.FancyBboxPatch(
-                (x, y_cursor), cw, row_h,
-                boxstyle="square,pad=0",
-                linewidth=0, facecolor=cor_fundo,
-                transform=ax.transData, clip_on=False
-            )
-            ax.add_patch(rect)
-
-            align = "right" if j == n_cols - 1 else "center"
-            x_txt = (x + cw - 0.15) if align == "right" else (x + cw / 2)
-            ax.text(x_txt, y_cursor + row_h / 2, val,
-                    ha=align, va="center",
-                    fontsize=9, fontweight=peso, color=cor_txt,
-                    transform=ax.transData)
-            x += cw
-
-    ax.set_xlim(0, fig_w)
-    ax.set_ylim(0, total_h)
-
-    plt.tight_layout(pad=0)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                facecolor=COR_BRANCO)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-
-# ── WhatsApp Cloud API ────────────────────────────────────────────────────────
-
-def upload_midia_whatsapp(img_bytes: bytes) -> str | None:
-    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/media"
-    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
-    files = {
-        "file": ("relatorio_p1.png", img_bytes, "image/png"),
-        "type": (None, "image/png"),
-        "messaging_product": (None, "whatsapp"),
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .main-header {
+        background: linear-gradient(135deg, #0d2b6b 0%, #1a52b3 60%, #2176ff 100%);
+        border-radius: 14px; padding: 2rem 2.5rem; margin-bottom: 1.5rem;
+        color: white; box-shadow: 0 8px 32px rgba(13,43,107,0.25);
     }
-    resp = requests.post(url, headers=headers, files=files)
-    if resp.status_code == 200:
-        return resp.json().get("id")
-    st.error(f"Erro no upload da mídia: {resp.status_code} — {resp.text}")
-    return None
-
-
-def enviar_imagem_whatsapp(media_id: str, numero: str) -> bool:
-    url = f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WA_TOKEN}",
-        "Content-Type": "application/json",
+    .main-header h1 { font-size: 2rem; font-weight: 700; margin: 0 0 0.3rem 0; letter-spacing: -0.5px; }
+    .main-header p { font-size: 0.95rem; opacity: 0.85; margin: 0; }
+    .metric-card {
+        background: white; border: 1px solid #e2e8f0; border-radius: 10px;
+        padding: 1rem 1.25rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
     }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": numero,
-        "type": "image",
-        "image": {
-            "id": media_id,
-            "caption": "📋 *Acompanhamento Suspensão/Vistoria P1*\nRelatório gerado automaticamente.",
-        },
+    .metric-card .label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.6px; }
+    .metric-card .value { font-size: 1.8rem; font-weight: 700; color: #0d2b6b; line-height: 1.2; }
+    .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.75rem; font-weight: 600; background: #e8f0fe; color: #1a52b3; margin-bottom: 1rem; }
+    .info-box { background: #f0f7ff; border-left: 4px solid #2176ff; border-radius: 0 8px 8px 0; padding: 0.85rem 1.1rem; font-size: 0.9rem; color: #1e3a5f; margin-bottom: 1rem; }
+    div[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
+    div[data-testid="stSidebar"] .sidebar-title { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; padding: 0.5rem 0 0.25rem 0; }
+    .stDownloadButton > button {
+        width: 100%; background: linear-gradient(135deg, #0d2b6b, #2176ff) !important;
+        color: white !important; border: none !important; border-radius: 8px !important;
+        font-weight: 600 !important; padding: 0.65rem 1rem !important; font-size: 0.95rem !important;
+        transition: opacity 0.2s; box-shadow: 0 4px 12px rgba(33,118,255,0.3) !important;
     }
-    resp = requests.post(url, headers=headers, json=payload)
-    if resp.status_code == 200:
-        return True
-    st.error(f"Erro ao enviar imagem: {resp.status_code} — {resp.text}")
-    return False
+    .stDownloadButton > button:hover { opacity: 0.9; }
+    .stSelectbox label, .stNumberInput label, .stFileUploader label { font-weight: 600 !important; font-size: 0.85rem !important; color: #334155 !important; }
+    .modal-card {
+        background: white; border: 1px solid #e2e8f0; border-radius: 10px;
+        padding: 1rem 1.1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-bottom: 0.75rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-def enviar_whatsapp(img_bytes: bytes, numero: str) -> bool:
-    if not WA_TOKEN or not WA_PHONE_ID:
-        st.error("⚠️ Credenciais do WhatsApp não configuradas nos Secrets do Streamlit.")
-        return False
-    with st.spinner("📤 Fazendo upload da imagem..."):
-        media_id = upload_midia_whatsapp(img_bytes)
-    if not media_id:
-        return False
-    with st.spinner("💬 Enviando pelo WhatsApp..."):
-        return enviar_imagem_whatsapp(media_id, numero)
+# ══════════════════════════════════════════════════════════════════
+# LEITURA E PREPARAÇÃO DE DADOS
+# ══════════════════════════════════════════════════════════════════
+
+def ler_xml(conteudo: bytes) -> pd.DataFrame:
+    try:
+        root = ET.fromstring(conteudo)
+    except ET.ParseError as e:
+        raise ValueError(f"XML inválido: {e}")
+
+    NS = "urn:schemas-microsoft-com:office:spreadsheet"
+    def tag(nome): return f"{{{NS}}}{nome}"
+
+    worksheet = root.find(f".//{tag('Worksheet')}")
+    if worksheet is not None:
+        table = worksheet.find(tag("Table"))
+        if table is None:
+            for ws in root.iter(tag("Worksheet")):
+                table = ws.find(tag("Table"))
+                if table is not None: break
+        if table is not None:
+            linhas = list(table.findall(tag("Row")))
+            if not linhas: raise ValueError("SpreadsheetML: nenhuma linha encontrada na tabela.")
+            ATTR_INDEX = f"{{{NS}}}Index"
+
+            def celulas(row_el):
+                vals = []; idx = 0
+                for cell in row_el.findall(tag("Cell")):
+                    ss_idx = cell.get(ATTR_INDEX)
+                    if ss_idx:
+                        alvo = int(ss_idx) - 1
+                        while idx < alvo: vals.append(""); idx += 1
+                    data_el = cell.find(tag("Data"))
+                    vals.append((data_el.text or "").strip() if data_el is not None else "")
+                    idx += 1
+                return vals
+
+            cabecalho = celulas(linhas[0])
+            cab_norm = []; contagem = {}
+            for c in cabecalho:
+                c = c.strip() if c.strip() else f"_col{len(cab_norm)}"
+                contagem[c] = contagem.get(c, 0) + 1
+                cab_norm.append(c if contagem[c] == 1 else f"{c}_{contagem[c]}")
+
+            registros = []
+            for row_el in list(linhas)[1:]:
+                vals = celulas(row_el)
+                while len(vals) < len(cab_norm): vals.append("")
+                registros.append(dict(zip(cab_norm, vals[:len(cab_norm)])))
+
+            if not registros: raise ValueError("SpreadsheetML: tabela sem linhas de dados.")
+            df = pd.DataFrame(registros)
+            df.columns = [str(c).strip() for c in df.columns]
+            df = df[df.apply(lambda r: any(str(v).strip() for v in r), axis=1)].reset_index(drop=True)
+            return df
+    return pd.DataFrame()
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+def ler_arquivo(arquivo) -> pd.DataFrame:
+    nome = arquivo.name.lower(); conteudo = arquivo.read()
+    if nome.endswith(".xml"): return ler_xml(conteudo)
+    elif nome.endswith((".xlsx", ".xls")): return pd.read_excel(io.BytesIO(conteudo))
+    else: raise ValueError("Formato de arquivo não suportado.")
 
-st.set_page_config(page_title="Acompanhamento Suspensão/Vistoria P1", layout="wide")
-st.title("📋 Acompanhamento de Suspensão/Vistoria P1")
 
-uploaded_file = st.file_uploader("Suba a base (.xlsx)", type=["xlsx"])
+def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = df.columns.str.strip()
+    if 'Situação' in df.columns:
+        df['Situação'] = df['Situação'].astype(str).str.strip()
+        df = df[df['Situação'] == 'Atribuida'].reset_index(drop=True)
+    else:
+        st.warning("⚠️ Coluna 'Situação' não encontrada. Nenhum filtro de situação foi aplicado.")
 
-SUBTIPOS_P1 = [
-    "P1 SUSPENSÃO - GRUPO A",
-    "P1 SUSPENSÃO - POSTE",
-    "P1 VISTORIA - RETIRADA DE RAMAL",
+    if 'Valor Faturas' in df.columns:
+        def _parse_valor(v):
+            s = str(v).strip().replace('R$', '').replace(' ', '')
+            if not s or s in ('nan', 'None', '-'): return 0.0
+            if ',' in s: s = s.replace('.', '').replace(',', '.')
+            try: return float(s)
+            except ValueError: return 0.0
+        df['Valor Faturas'] = df['Valor Faturas'].apply(_parse_valor)
+
+    if 'Quantidade Faturas' in df.columns:
+        df['Quantidade Faturas'] = pd.to_numeric(df['Quantidade Faturas'], errors='coerce').fillna(0).astype(int)
+
+    if 'Data Inclusão' in df.columns:
+        df['Data Inclusão'] = pd.to_datetime(df['Data Inclusão'], dayfirst=True, errors='coerce')
+
+    return df
+
+
+# ─── COLUNAS DE SAÍDA — Endereço e Bairro incluídos ───
+COLUNAS_SAIDA = [
+    'Numero', 'Subtipo', 'Data Inclusão', 'Prefixo',
+    'Instalação CCS', 'Situação', 'Valor Faturas', 'Quantidade Faturas', 'Endereço', 'Bairro'
 ]
 
-if uploaded_file:
-    try:
-        df = pd.read_excel(uploaded_file, sheet_name="Sheet1")
+MODALIDADES = ["ARRECADADO", "QUANTIDADE DE FATURAS", "SUSPENSÃO E VISTORIA P1", "GRUPO A"]
 
-        required_cols = {"Subtipo", "Data Inclusão", "Numero", "Valor Faturas"}
-        if not required_cols.issubset(df.columns):
-            st.error(f"Colunas esperadas não encontradas. Necessário: {required_cols}")
-            st.stop()
+# Coluna usada para ordenar/definir o "corte" de cada modalidade, e direção da ordenação
+COLUNA_ORDENACAO = {
+    "ARRECADADO": ("Valor Faturas", False),
+    "QUANTIDADE DE FATURAS": ("Quantidade Faturas", False),
+    "SUSPENSÃO E VISTORIA P1": ("Data Inclusão", True),
+    "GRUPO A": ("Valor Faturas", False),
+}
 
-        df_p1 = df[df["Subtipo"].isin(SUBTIPOS_P1)].copy()
-        df_p1["Data Inclusão"] = pd.to_datetime(df_p1["Data Inclusão"]).dt.date
+SUBTIPOS_EXCLUIR_ARRECADADO = [
+    "P2 VISTORIA - GRUPO A", "P1 SUSPENSÃO - GRUPO A", "P3 SUSPENSÃO - GRUPO A",
+    "P2 SUSPENSÃO - GRUPO A", "P3 VISTORIA - GRUPO A", "P1 VISTORIA - GRUPO A",
+]
+SUBTIPOS_SUSPENSAO_P1 = [
+    "P1 SUSPENSÃO - GRUPO A", "P1 SUSPENSÃO - POSTE", "P1 VISTORIA - RETIRADA DE RAMAL",
+]
+SUBTIPOS_GRUPO_A = [
+    "P2 VISTORIA - GRUPO A", "P1 SUSPENSÃO - GRUPO A", "P3 SUSPENSÃO - GRUPO A",
+    "P2 SUSPENSÃO - GRUPO A", "P3 VISTORIA - GRUPO A", "P1 VISTORIA - GRUPO A",
+]
 
-        pivot_qtd = (
-            df_p1.groupby(["Data Inclusão", "Subtipo"])["Numero"]
-            .count()
-            .unstack(fill_value=0)
-            .reindex(columns=SUBTIPOS_P1, fill_value=0)
+
+def selecionar_colunas(df: pd.DataFrame, extras=None) -> pd.DataFrame:
+    colunas_desejadas = COLUNAS_SAIDA + (extras or [])
+    cols = [c for c in colunas_desejadas if c in df.columns]
+    return df[cols]
+
+
+# ══════════════════════════════════════════════════════════════════
+# LÓGICA DE MODALIDADE — separada em duas camadas:
+#   1) obter_base_modalidade -> aplica filtros + ordenação (SEM limitar por prefixo)
+#   2) modalidade_* -> aplica também o limite por prefixo (usado na aba "Relatório")
+# A separação permite reaproveitar a base ordenada nas abas de Mesclagem e Cortes.
+# ══════════════════════════════════════════════════════════════════
+
+def obter_base_modalidade(df: pd.DataFrame, modalidade: str, limite_faturas=None, teto_faturas=None) -> pd.DataFrame:
+    result = df.copy()
+
+    if modalidade == "ARRECADADO":
+        if 'Subtipo' in result.columns:
+            result = result[~result['Subtipo'].isin(SUBTIPOS_EXCLUIR_ARRECADADO)]
+        if limite_faturas is not None and 'Quantidade Faturas' in result.columns:
+            result = result[result['Quantidade Faturas'] <= limite_faturas]
+        if 'Valor Faturas' in result.columns:
+            result = result.sort_values('Valor Faturas', ascending=False)
+
+    elif modalidade == "QUANTIDADE DE FATURAS":
+        if teto_faturas is not None and 'Quantidade Faturas' in result.columns:
+            result = result[result['Quantidade Faturas'] >= teto_faturas]
+        if 'Quantidade Faturas' in result.columns:
+            result = result.sort_values('Quantidade Faturas', ascending=False)
+
+    elif modalidade == "SUSPENSÃO E VISTORIA P1":
+        if 'Subtipo' in result.columns:
+            result = result[result['Subtipo'].isin(SUBTIPOS_SUSPENSAO_P1)]
+        sort_cols, ascendings = [], []
+        if 'Data Inclusão' in result.columns: sort_cols.append('Data Inclusão'); ascendings.append(True)
+        if 'Valor Faturas' in result.columns: sort_cols.append('Valor Faturas'); ascendings.append(False)
+        if sort_cols: result = result.sort_values(sort_cols, ascending=ascendings)
+
+    elif modalidade == "GRUPO A":
+        if 'Subtipo' in result.columns:
+            result = result[result['Subtipo'].isin(SUBTIPOS_GRUPO_A)]
+        if 'Valor Faturas' in result.columns:
+            result = result.sort_values('Valor Faturas', ascending=False)
+
+    return result
+
+
+def aplicar_limite_prefixo(df: pd.DataFrame, limite_prefixo: int) -> pd.DataFrame:
+    if 'Prefixo' in df.columns:
+        return df.groupby('Prefixo', group_keys=False).head(limite_prefixo)
+    return df
+
+
+def modalidade_arrecadado(df, limite_faturas, limite_prefixo):
+    result = aplicar_limite_prefixo(obter_base_modalidade(df, "ARRECADADO", limite_faturas=limite_faturas), limite_prefixo)
+    return selecionar_colunas(result)
+
+
+def modalidade_quantidade_faturas(df, piso_faturas, limite_prefixo):
+    result = aplicar_limite_prefixo(obter_base_modalidade(df, "QUANTIDADE DE FATURAS", teto_faturas=piso_faturas), limite_prefixo)
+    return selecionar_colunas(result)
+
+
+def modalidade_suspensao_p1(df, limite_prefixo):
+    result = aplicar_limite_prefixo(obter_base_modalidade(df, "SUSPENSÃO E VISTORIA P1"), limite_prefixo)
+    return selecionar_colunas(result)
+
+
+def modalidade_grupo_a(df, limite_prefixo):
+    result = aplicar_limite_prefixo(obter_base_modalidade(df, "GRUPO A"), limite_prefixo)
+    return selecionar_colunas(result)
+
+
+# ══════════════════════════════════════════════════════════════════
+# GERAÇÃO DE EXCEL
+# ══════════════════════════════════════════════════════════════════
+
+def gerar_excel(df: pd.DataFrame, nome_aba: str) -> bytes:
+    wb = Workbook(); ws = wb.active; ws.title = nome_aba[:30]
+    COR_HEADER_BG = "0D2B6B"; COR_HEADER_FG = "FFFFFF"
+    COR_LINHA_PAR = "EEF3FB"; COR_LINHA_IMPAR = "FFFFFF"; COR_BORDA = "C7D6ED"
+
+    header_fill  = PatternFill("solid", fgColor=COR_HEADER_BG)
+    header_font  = Font(bold=True, color=COR_HEADER_FG, size=10, name="Calibri")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    par_fill     = PatternFill("solid", fgColor=COR_LINHA_PAR)
+    impar_fill   = PatternFill("solid", fgColor=COR_LINHA_IMPAR)
+    thin  = Side(style="thin", color=COR_BORDA)
+    borda = Border(left=thin, right=thin, top=thin, bottom=thin)
+    body_font = Font(size=9, name="Calibri")
+
+    headers = list(df.columns)
+    for col_idx, col_name in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill = header_fill; cell.font = header_font
+        cell.alignment = header_align; cell.border = borda
+    ws.row_dimensions[1].height = 30
+
+    for row_idx, row in enumerate(df.itertuples(index=False), start=2):
+        fill = par_fill if row_idx % 2 == 0 else impar_fill
+        for col_idx, (col_name, value) in enumerate(zip(headers, row), start=1):
+            if col_name == 'Data Inclusão' and pd.notna(value):
+                try: cell_val = pd.Timestamp(value).to_pydatetime()
+                except Exception: cell_val = value
+            else:
+                cell_val = value
+            cell = ws.cell(row=row_idx, column=col_idx, value=cell_val)
+            cell.fill = fill; cell.font = body_font; cell.border = borda
+            if col_name == 'Valor Faturas':
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.number_format = 'R$ #,##0.00'
+            elif col_name == 'Quantidade Faturas':
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name == 'Data Inclusão':
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.number_format = 'DD/MM/YYYY'
+            elif col_name in ('Numero', 'Prefixo', 'Instalação CCS', 'Situação', 'Modalidade'):
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif col_name in ('Endereço', 'Bairro'):
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+    for col_idx, col_name in enumerate(headers, start=1):
+        col_letter = get_column_letter(col_idx)
+        max_len = max(
+            len(str(col_name)),
+            *[len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, ws.max_row + 1)]
         )
-        pivot_qtd["Total Geral"] = pivot_qtd.sum(axis=1)
+        limite = 60 if col_name == 'Endereço' else 35 if col_name == 'Bairro' else 45
+        ws.column_dimensions[col_letter].width = min(max_len + 4, limite)
 
-        divida_dia = (
-            df_p1.groupby("Data Inclusão")["Valor Faturas"]
-            .sum()
-            .rename("Total Dívida")
-        )
+    ws.freeze_panes = "A2"
+    ws.sheet_view.showGridLines = True
+    ws.auto_filter.ref = ws.dimensions
 
-        tabela = pivot_qtd.join(divida_dia).reset_index()
-        tabela = tabela.rename(columns={"Data Inclusão": "DATA"})
-        tabela = tabela.sort_values("DATA")
+    buffer = io.BytesIO(); wb.save(buffer); return buffer.getvalue()
 
-        totais = tabela.drop(columns="DATA").sum()
-        totais_row = pd.DataFrame([["Total Geral"] + totais.tolist()], columns=tabela.columns)
-        tabela_exibir = pd.concat([tabela, totais_row], ignore_index=True)
 
-        tabela_exibir["DATA"] = tabela_exibir["DATA"].apply(
-            lambda x: x.strftime("%d/%b").replace("/0", "/").replace(
-                "Jan","jan").replace("Feb","fev").replace("Mar","mar").replace(
-                "Apr","abr").replace("May","mai").replace("Jun","jun").replace(
-                "Jul","jul").replace("Aug","ago").replace("Sep","set").replace(
-                "Oct","out").replace("Nov","nov").replace("Dec","dez")
-            if hasattr(x, "strftime") else str(x)
-        )
+def formatar_valor_corte(modalidade, valor):
+    if valor is None or pd.isna(valor):
+        return "—"
+    if modalidade in ("ARRECADADO", "GRUPO A"):
+        return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    if modalidade == "QUANTIDADE DE FATURAS":
+        return f"{int(valor)}"
+    if modalidade == "SUSPENSÃO E VISTORIA P1":
+        try: return pd.Timestamp(valor).strftime("%d/%m/%Y")
+        except Exception: return str(valor)
+    return str(valor)
 
-        tabela_exibir["Total Dívida"] = tabela_exibir["Total Dívida"].apply(
-            lambda x: f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            if x != "Total Dívida" else x
-        )
 
-        # Métricas
-        st.subheader("Resumo do Período")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("P1 Suspensão - Grupo A", int(pivot_qtd["P1 SUSPENSÃO - GRUPO A"].sum()))
-        col2.metric("P1 Suspensão - Poste", int(pivot_qtd["P1 SUSPENSÃO - POSTE"].sum()))
-        col3.metric("P1 Vistoria - Ret. Ramal", int(pivot_qtd["P1 VISTORIA - RETIRADA DE RAMAL"].sum()))
-        total_divida = divida_dia.sum()
-        total_fmt = f"R$ {total_divida:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        col4.metric("Total Dívida", total_fmt)
+# ══════════════════════════════════════════════════════════════════
+# INTERFACE
+# ══════════════════════════════════════════════════════════════════
 
-        st.divider()
+st.markdown("""
+<div class="main-header">
+    <h1>⚡ Relatório de Serviços Prioritários</h1>
+    <p>Automatize a geração do relatório diário com filtros inteligentes por modalidade.</p>
+</div>
+""", unsafe_allow_html=True)
 
-        # Gera imagem e excel
-        excel_bytes = gerar_excel(tabela)
-        img_bytes   = gerar_imagem_tabela(tabela, divida_dia)
+with st.sidebar:
+    st.markdown('<p class="sidebar-title">📁 Entrada de Dados</p>', unsafe_allow_html=True)
+    arquivo = st.file_uploader("Carregar arquivo", type=["xlsx", "xls", "xml"],
+        help="Formatos aceitos: .xlsx, .xls, .xml (SpreadsheetML)")
 
-        # Preview da imagem
-        st.subheader("Detalhamento por Dia")
-        st.image(img_bytes, use_container_width=True)
+if arquivo is None:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div style="text-align:center; padding: 3rem 1rem; color: #94a3b8;">
+            <div style="font-size: 3rem; margin-bottom: 1rem;">📂</div>
+            <div style="font-size: 1.1rem; font-weight: 600; color: #64748b;">Nenhum arquivo carregado</div>
+            <div style="font-size: 0.9rem; margin-top: 0.5rem;">
+                Use o painel lateral para carregar um arquivo <b>.xlsx</b>, <b>.xls</b> ou <b>.xml</b>.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    st.stop()
 
-        st.divider()
+try:
+    with st.spinner("📊 Lendo e processando o arquivo..."):
+        df_raw = ler_arquivo(arquivo)
+        df_clean = preparar_dados(df_raw)
+except ValueError as e:
+    st.error(f"❌ Erro ao processar o arquivo: {e}"); st.stop()
+except Exception as e:
+    st.error(f"❌ Erro inesperado: {e}"); st.stop()
 
-        # Botões
-        col_excel, col_whats = st.columns([1, 1])
+total_raw = len(df_raw); total_clean = len(df_clean)
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.markdown(f'<div class="metric-card"><div class="label">Total de Registros</div><div class="value">{total_raw:,}</div></div>', unsafe_allow_html=True)
+with col2:
+    st.markdown(f'<div class="metric-card"><div class="label">Registros "Atribuida"</div><div class="value">{total_clean:,}</div></div>', unsafe_allow_html=True)
+with col3:
+    perc = round((total_clean / total_raw * 100) if total_raw else 0, 1)
+    st.markdown(f'<div class="metric-card"><div class="label">Taxa de Aproveitamento</div><div class="value">{perc}%</div></div>', unsafe_allow_html=True)
+with col4:
+    prefixos = df_clean['Prefixo'].nunique() if 'Prefixo' in df_clean.columns else 0
+    st.markdown(f'<div class="metric-card"><div class="label">Prefixos Distintos</div><div class="value">{prefixos}</div></div>', unsafe_allow_html=True)
 
-        col_excel.download_button(
-            label="⬇️ Baixar Excel",
-            data=excel_bytes,
-            file_name="acompanhamento_suspensao_p1.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+st.markdown("<br>", unsafe_allow_html=True)
 
-        with col_whats:
-            if st.button("💬 Enviar imagem pelo WhatsApp", use_container_width=True):
-                st.session_state["mostrar_envio_zap"] = True
+tab_relatorio, tab_mesclar, tab_cortes = st.tabs([
+    "📄 Relatório", "🔀 Mesclar Modalidades", "✂️ Análise de Cortes"
+])
 
-        # Painel de envio
-        if st.session_state.get("mostrar_envio_zap"):
-            with st.expander("📤 Confirmar envio pelo WhatsApp", expanded=True):
-                numero = st.text_input(
-                    "📱 Número do destinatário",
-                    placeholder="Ex: 5562999999999  (DDI + DDD + número, sem espaços)",
-                    key="numero_destinatario"
+# ─────────────────────────────────────────────────────────────
+# ABA 1 — RELATÓRIO (modalidade única, comportamento original)
+# ─────────────────────────────────────────────────────────────
+with tab_relatorio:
+    col_cfg, col_out = st.columns([1, 3])
+
+    with col_cfg:
+        st.markdown('<p class="sidebar-title">🎯 Configuração</p>', unsafe_allow_html=True)
+        modalidade = st.selectbox("Modalidade de Prioridade", options=MODALIDADES,
+            help="Selecione a lógica de filtragem e ordenação desejada.", key="rel_modalidade")
+        st.markdown('<p class="sidebar-title">⚙️ Parâmetros</p>', unsafe_allow_html=True)
+        limite_prefixo = st.number_input("Máx. de serviços por Prefixo", min_value=1, max_value=100, value=5, step=1, key="rel_limite_prefixo")
+        limite_faturas = None; teto_faturas = None
+
+        if modalidade == "ARRECADADO":
+            st.markdown('<div class="info-box">🔹 Ordena por <b>Valor Faturas</b> (maior → menor). Exclui subtipos de Grupo A e Vistoria.</div>', unsafe_allow_html=True)
+            limite_faturas = st.number_input("Limite máximo de Qtd. Faturas", min_value=1, max_value=99999, value=10, step=1, key="rel_limite_faturas")
+        elif modalidade == "QUANTIDADE DE FATURAS":
+            st.markdown('<div class="info-box">🔹 Ordena por <b>Quantidade de Faturas</b> (maior → menor).</div>', unsafe_allow_html=True)
+            teto_faturas = st.number_input("Teto máximo de Qtd. Faturas", min_value=1, max_value=99999, value=10, step=1, key="rel_teto_faturas")
+        elif modalidade == "SUSPENSÃO E VISTORIA P1":
+            st.markdown('<div class="info-box">🔹 Filtra subtipos P1. Ordena por <b>Data Inclusão</b> (mais antiga) e desempata por <b>Valor Faturas</b> (maior).</div>', unsafe_allow_html=True)
+        elif modalidade == "GRUPO A":
+            st.markdown('<div class="info-box">🔹 Filtra subtipos Grupo A e ordena por <b>Valor Faturas</b> (maior → menor).</div>', unsafe_allow_html=True)
+
+    with col_out:
+        with st.spinner(f"⚙️ Aplicando filtros da modalidade **{modalidade}**..."):
+            if modalidade == "ARRECADADO":
+                df_result = modalidade_arrecadado(df_clean, limite_faturas, limite_prefixo)
+            elif modalidade == "QUANTIDADE DE FATURAS":
+                df_result = modalidade_quantidade_faturas(df_clean, teto_faturas, limite_prefixo)
+            elif modalidade == "SUSPENSÃO E VISTORIA P1":
+                df_result = modalidade_suspensao_p1(df_clean, limite_prefixo)
+            elif modalidade == "GRUPO A":
+                df_result = modalidade_grupo_a(df_clean, limite_prefixo)
+
+        st.markdown(f"""
+        <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem;">
+            <span class="badge">✅ {modalidade}</span>
+            <span style="color:#64748b; font-size:0.9rem;">{len(df_result):,} registros encontrados</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if df_result.empty:
+            st.warning("⚠️ Nenhum registro encontrado com os filtros aplicados. Tente ajustar os parâmetros.")
+        else:
+            st.dataframe(df_result, use_container_width=True, height=420, hide_index=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            excel_bytes = gerar_excel(df_result, modalidade)
+            nome_arquivo = f"relatorio_{modalidade.lower().replace(' ', '_')}.xlsx"
+            st.download_button(
+                label=f"⬇️  Baixar Relatório Excel — {modalidade}",
+                data=excel_bytes, file_name=nome_arquivo,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="rel_download",
+            )
+
+# ─────────────────────────────────────────────────────────────
+# ABA 2 — MESCLAR MODALIDADES
+# Uma caixa de seleção por modalidade, com campo de quantidade
+# logo abaixo. É necessário marcar pelo menos duas para mesclar.
+# ─────────────────────────────────────────────────────────────
+with tab_mesclar:
+    st.markdown('<div class="info-box">🔹 Selecione ao menos <b>duas modalidades</b> e informe a quantidade de registros desejada para cada uma. Os registros de todas as modalidades marcadas serão combinados em um único relatório (sem duplicar o mesmo <b>Número</b>).</div>', unsafe_allow_html=True)
+
+    cols_mesclar = st.columns(len(MODALIDADES))
+    selecoes = {}
+    for i, mod in enumerate(MODALIDADES):
+        with cols_mesclar[i]:
+            st.markdown(f'<div class="modal-card">', unsafe_allow_html=True)
+            marcado = st.checkbox(mod, key=f"mesclar_check_{mod}")
+            qtd = st.number_input("Quantidade", min_value=1, max_value=9999, value=10, step=1,
+                                   key=f"mesclar_qtd_{mod}", disabled=not marcado)
+            st.markdown('</div>', unsafe_allow_html=True)
+            selecoes[mod] = {"marcado": marcado, "quantidade": qtd}
+
+    modalidades_marcadas = [m for m, v in selecoes.items() if v["marcado"]]
+
+    calcular = st.button("🔀 Mesclar Modalidades", key="mesclar_btn")
+
+    if calcular:
+        if len(modalidades_marcadas) < 2:
+            st.error("⚠️ Selecione pelo menos duas modalidades para mesclar.")
+        else:
+            partes = []
+            for mod in modalidades_marcadas:
+                base = obter_base_modalidade(df_clean, mod)
+                qtd = selecoes[mod]["quantidade"]
+                parte = base.head(qtd).copy()
+                parte = selecionar_colunas(parte)
+                parte["Modalidade"] = mod
+                partes.append(parte)
+
+            df_mesclado = pd.concat(partes, ignore_index=True)
+            antes_dedup = len(df_mesclado)
+            if 'Numero' in df_mesclado.columns:
+                df_mesclado = df_mesclado.drop_duplicates(subset='Numero', keep='first').reset_index(drop=True)
+            duplicados_removidos = antes_dedup - len(df_mesclado)
+
+            st.markdown(f"""
+            <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem;">
+                <span class="badge">✅ {' + '.join(modalidades_marcadas)}</span>
+                <span style="color:#64748b; font-size:0.9rem;">{len(df_mesclado):,} registros combinados
+                {f' · {duplicados_removidos} duplicado(s) removido(s)' if duplicados_removidos else ''}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if df_mesclado.empty:
+                st.warning("⚠️ Nenhum registro encontrado com as modalidades e quantidades selecionadas.")
+            else:
+                st.dataframe(df_mesclado, use_container_width=True, height=420, hide_index=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                excel_bytes_mesclado = gerar_excel(df_mesclado, "MESCLADO")
+                st.download_button(
+                    label="⬇️  Baixar Relatório Mesclado",
+                    data=excel_bytes_mesclado, file_name="relatorio_mesclado.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="mesclar_download",
                 )
-                st.caption("🇧🇷 Brasil: comece com 55 — ex: **5562999887766**")
 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if st.button("✅ Confirmar envio", use_container_width=True):
-                        if not numero.strip():
-                            st.warning("Digite o número antes de enviar.")
-                        elif not numero.strip().isdigit() or len(numero.strip()) < 12:
-                            st.warning("Número inválido. Use apenas dígitos com DDI+DDD, ex: 5562999887766")
+# ─────────────────────────────────────────────────────────────
+# ABA 3 — ANÁLISE DE CORTES
+# O usuário define os critérios no topo e clica em calcular.
+# Mostra, para cada modalidade, quantos registros resultam em
+# cada limite de "serviços por Prefixo" e qual o valor de corte
+# (o valor limite do último registro incluído). Apenas visual —
+# não há botão de download nesta aba.
+# ─────────────────────────────────────────────────────────────
+with tab_cortes:
+    st.markdown('<div class="info-box">🔹 Defina os critérios abaixo e clique em <b>Calcular Cortes</b> para visualizar, por modalidade, quantos registros resultam em cada limite de serviços por Prefixo e qual o valor de corte (o valor do último registro incluído no limite). Esta aba é apenas para análise — não gera arquivo para download.</div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        modalidades_analise = st.multiselect("Modalidades a analisar", options=MODALIDADES, default=MODALIDADES, key="cortes_modalidades")
+    with c2:
+        limite_min = st.number_input("Limite mínimo por Prefixo", min_value=1, max_value=100, value=1, step=1, key="cortes_min")
+    with c3:
+        limite_max = st.number_input("Limite máximo por Prefixo", min_value=1, max_value=100, value=10, step=1, key="cortes_max")
+
+    c4, c5 = st.columns(2)
+    with c4:
+        limite_faturas_cortes = st.number_input("Limite máx. de Qtd. Faturas (ARRECADADO)", min_value=1, max_value=99999, value=10, step=1, key="cortes_limite_faturas")
+    with c5:
+        teto_faturas_cortes = st.number_input("Teto máx. de Qtd. Faturas (QUANTIDADE DE FATURAS)", min_value=1, max_value=99999, value=10, step=1, key="cortes_teto_faturas")
+
+    calcular_cortes = st.button("✂️ Calcular Cortes", key="cortes_btn")
+
+    if calcular_cortes:
+        if limite_min > limite_max:
+            st.error("⚠️ O limite mínimo não pode ser maior que o limite máximo.")
+        elif not modalidades_analise:
+            st.error("⚠️ Selecione ao menos uma modalidade para analisar.")
+        else:
+            for mod in modalidades_analise:
+                st.markdown(f"#### {mod}")
+                kwargs = {}
+                if mod == "ARRECADADO": kwargs["limite_faturas"] = limite_faturas_cortes
+                if mod == "QUANTIDADE DE FATURAS": kwargs["teto_faturas"] = teto_faturas_cortes
+
+                base = obter_base_modalidade(df_clean, mod, **kwargs)
+                sort_col, _ = COLUNA_ORDENACAO[mod]
+
+                linhas = []
+                for limite in range(int(limite_min), int(limite_max) + 1):
+                    grupo = aplicar_limite_prefixo(base, limite)
+                    qtd_registros = len(grupo)
+                    valor_corte = None
+                    if qtd_registros > 0 and sort_col in grupo.columns:
+                        if mod == "SUSPENSÃO E VISTORIA P1":
+                            valor_corte = grupo[sort_col].max()
                         else:
-                            sucesso = enviar_whatsapp(img_bytes, numero.strip())
-                            if sucesso:
-                                st.success("✅ Imagem enviada com sucesso!")
-                                st.session_state["mostrar_envio_zap"] = False
-                with col_b:
-                    if st.button("❌ Cancelar", use_container_width=True):
-                        st.session_state["mostrar_envio_zap"] = False
-                        st.rerun()
+                            valor_corte = grupo[sort_col].min()
+                    linhas.append({
+                        "Limite por Prefixo": limite,
+                        "Qtd. Registros": qtd_registros,
+                        "Valor de Corte": formatar_valor_corte(mod, valor_corte),
+                    })
 
-        # Tabela numérica abaixo
-        st.dataframe(
-            tabela_exibir,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "DATA": st.column_config.TextColumn("DATA"),
-                "P1 SUSPENSÃO - GRUPO A": st.column_config.NumberColumn("P1 SUSPENSÃO - GRUPO A"),
-                "P1 SUSPENSÃO - POSTE": st.column_config.NumberColumn("P1 SUSPENSÃO - POSTE"),
-                "P1 VISTORIA - RETIRADA DE RAMAL": st.column_config.NumberColumn("P1 VISTORIA - RETIRADA DE RAMAL"),
-                "Total Geral": st.column_config.NumberColumn("Total Geral"),
-                "Total Dívida": st.column_config.TextColumn("Total Dívida"),
-            },
-        )
-
-    except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
-else:
-    st.info("👆 Suba um arquivo .xlsx para começar.")
+                df_cortes = pd.DataFrame(linhas)
+                if base.empty:
+                    st.warning("⚠️ Nenhum registro-base encontrado para esta modalidade com os critérios atuais.")
+                else:
+                    st.dataframe(df_cortes, use_container_width=True, hide_index=True)
+                st.markdown("<br>", unsafe_allow_html=True)
