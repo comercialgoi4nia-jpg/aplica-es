@@ -115,7 +115,7 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
         df['Situação'] = df['Situação'].astype(str).str.strip()
         df = df[df['Situação'] == 'Atribuida'].reset_index(drop=True)
     else:
-        st.warning("⚠️ Coluna 'Situação' não encontrada. Nenhum filtro de situação foi aplicado.")
+        st.warning("Coluna 'Situação' não encontrada. Nenhum filtro de situação foi aplicado.")
 
     if 'Valor Faturas' in df.columns:
         def _parse_valor(v):
