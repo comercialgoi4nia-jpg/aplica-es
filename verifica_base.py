@@ -31,10 +31,8 @@ ALIASES_COLUNAS = {
     "Serviço":           ["Serviço", "Servico", "serviço"],
 }
 
-# Lista de tipos excluídos do Oper
+# Lista de tipos excluídos (aplicada tanto no Oper quanto no Cbill)
 TIPOS_EXCLUIDOS_OPER = [
-    "RESTABELECIMENTO FORNEC. NORMAL",
-    "RESTABELECIMENTO FORNEC. NORMAL - MUDANÇA TITULARIDADE",
     "RD - EXECUÇÃO DE OBRA 60D",
     "RD - ELABORAÇÃO DE PROJETO DE OBRA",
     "RECLAMAÇÃO DE NIVEL DE TENSÃO",
@@ -55,9 +53,9 @@ TIPOS_EXCLUIDOS_OPER = [
     "RD - ELABORAÇÃO DE PROJETO DE OBRA - URBANA",
     "RD - EXTENSÃO DE REDE AT - CRONOGRAMA DA DISTRIBUIDORA",
     "RD - EXTENSÃO DE REDE ILUMINAÇÃO",
+    "LIGAÇÃO NOVA DE EQUIPAMENTO DE TRÂNSITO",
     
-
-    ]
+]
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -410,7 +408,7 @@ with aba_config:
     st.markdown("🔵 **Cbill:** `Serviço` · `Prazo de execução` · `Tipo Serviço`")
     st.markdown("🟠 **Oper:** `Numero` · `Data/Hora Limite` · `Subtipo` · `Situação`")
     st.markdown("---")
-    st.markdown("**Filtros automáticos Oper:**")
+    st.markdown("**Filtros automáticos (Cbill e Oper):**")
     for t in TIPOS_EXCLUIDOS_OPER:
         st.markdown(f"🚫 `{t}`")
     st.markdown("---")
@@ -519,11 +517,17 @@ if arquivo_cbill and arquivo_oper_com:
             (df_oper_full[cols_oper_com["data"]] <= ts_fim)
         ].copy()
 
-        # ── remove tipos excluídos apenas do Oper ──
+        # ── remove tipos excluídos do Oper ──
         col_tipo_oper = cols_oper_com["tipo"]
         tipos_upper   = [t.upper() for t in TIPOS_EXCLUIDOS_OPER]
         base_oper = base_oper[
             ~base_oper[col_tipo_oper].astype(str).str.strip().str.upper().isin(tipos_upper)
+        ].copy()
+
+        # ── remove tipos excluídos do Cbill (mesma lista) ──
+        col_tipo_cbill = cols_cbill["tipo"]
+        base_cbill = base_cbill[
+            ~base_cbill[col_tipo_cbill].astype(str).str.strip().str.upper().isin(tipos_upper)
         ].copy()
 
         total_cbill = len(base_cbill)
@@ -540,7 +544,7 @@ if arquivo_cbill and arquivo_oper_com:
         # ── identifica divergências ──
         col_srv_cbill  = cols_cbill["servico"]
         col_srv_oper   = cols_oper_com["servico"]
-        col_tipo_cbill = cols_cbill["tipo"]
+        col_tipo_cbill_display = cols_cbill["tipo"]
         col_sit_oper   = cols_oper_com.get("situacao")
         tem_situacao   = col_sit_oper and col_sit_oper in base_oper.columns
 
@@ -557,7 +561,7 @@ if arquivo_cbill and arquivo_oper_com:
             for _, row in linhas.iterrows():
                 registros.append({
                     "servico":        row[col_srv_cbill],
-                    "tipo_servico":   str(row.get(col_tipo_cbill, "")).strip(),
+                    "tipo_servico":   str(row.get(col_tipo_cbill_display, "")).strip(),
                     "situacao":       "—",
                     "data_limite":    row[cols_cbill["data"]].date() if pd.notna(row[cols_cbill["data"]]) else data_inicio,
                     "ausente_em":     "Oper",
