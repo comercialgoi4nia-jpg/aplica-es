@@ -33,8 +33,6 @@ ALIASES_COLUNAS = {
 
 # Lista de tipos excluídos (aplicada tanto no Oper quanto no Cbill)
 TIPOS_EXCLUIDOS_OPER = [
-    "RESTABELECIMENTO FORNEC. NORMAL",
-    "RESTABELECIMENTO FORNEC. NORMAL - MUDANÇA TITULARIDADE",
     "RD - EXECUÇÃO DE OBRA 60D",
     "RD - ELABORAÇÃO DE PROJETO DE OBRA",
     "RECLAMAÇÃO DE NIVEL DE TENSÃO",
@@ -55,6 +53,8 @@ TIPOS_EXCLUIDOS_OPER = [
     "RD - ELABORAÇÃO DE PROJETO DE OBRA - URBANA",
     "RD - EXTENSÃO DE REDE AT - CRONOGRAMA DA DISTRIBUIDORA",
     "RD - EXTENSÃO DE REDE ILUMINAÇÃO",
+    "LIGAÇÃO NOVA DE EQUIPAMENTO DE TRÂNSITO",
+    
 ]
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
